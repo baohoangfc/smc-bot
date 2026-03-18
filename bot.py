@@ -245,7 +245,9 @@ send_telegram(
     f"{datetime.now().strftime('%d/%m/%Y %H:%M')} (GMT+7)"
 )
 
-last_signal_key = None
+last_signal_key  = None
+last_status_time = datetime.now() - timedelta(minutes=10)  # Gửi ngay lần đầu
+STATUS_INTERVAL  = 10 * 60  # 10 phút
 
 while True:
     try:
@@ -254,13 +256,24 @@ while True:
 
         if df is None:
             print(f"[{now_str}] Khong tai duoc data")
+            # Vẫn gửi status nếu đến giờ
+            elapsed = (datetime.now() - last_status_time).total_seconds()
+            if elapsed >= STATUS_INTERVAL:
+                send_telegram(
+                    f"⚠️ <b>SMC Bot - Canh bao</b>\n\n"
+                    f"Khong tai duoc du lieu XAUUSDT\n"
+                    f"Dang thu lai...\n\n"
+                    f"<i>{datetime.now().strftime('%d/%m/%Y %H:%M')} (GMT+7)</i>"
+                )
+                last_status_time = datetime.now()
             time.sleep(60)
             continue
 
-        df     = add_indicators(df)
-        price  = round(df['close'].iloc[-1], 2)
+        df    = add_indicators(df)
+        price = round(df['close'].iloc[-1], 2)
         signal = scan_signal(df)
 
+        # --- GỬI TÍN HIỆU MỚI ---
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
@@ -273,6 +286,34 @@ while True:
         else:
             print(f"[{now_str}] Gia:{price} | Chua co tin hieu")
 
+        # --- GỬI TRẠNG THÁI MỖI 10 PHÚT ---
+        elapsed = (datetime.now() - last_status_time).total_seconds()
+        if elapsed >= STATUS_INTERVAL:
+            if signal:
+                sig_side  = "LONG (MUA)" if signal['side']=="LONG" else "SHORT (BAN)"
+                sig_emoji = "🟢" if signal['side']=="LONG" else "🔴"
+                sig_info  = (
+                    f"{sig_emoji} Co tin hieu: <b>{sig_side}</b>\n"
+                    f"   Entry : <b>{round(signal['entry'],2)}</b>\n"
+                    f"   SL    : <b>{round(signal['sl'],2)}</b>\n"
+                    f"   TP    : <b>{round(signal['tp'],2)}</b>\n"
+                    f"   (Chua vao lenh - dang cho retest)"
+                )
+            else:
+                sig_info = "⏳ Chua co tin hieu. Dang theo doi..."
+
+            status_msg = (
+                f"🤖 <b>SMC Bot - Cap nhat {datetime.now().strftime('%H:%M')} (GMT+7)</b>\n\n"
+                f"Gia XAUUSDT : <b>{price}</b>\n"
+                f"Khung TG    : <b>{INTERVAL}</b>\n"
+                f"Trang thai  : ✅ Dang chay\n\n"
+                f"{sig_info}\n\n"
+                f"<i>Cap nhat tiep theo luc {(datetime.now() + timedelta(minutes=10)).strftime('%H:%M')}</i>"
+            )
+            send_telegram(status_msg)
+            print(f"[{now_str}] Da gui status Telegram")
+            last_status_time = datetime.now()
+
         time.sleep(CHECK_SECS)
 
     except KeyboardInterrupt:
@@ -280,4 +321,12 @@ while True:
         break
     except Exception as e:
         print(f"[{now_str}] Loi: {e}")
+        # Gửi cảnh báo lỗi về Telegram
+        try:
+            send_telegram(
+                f"❌ <b>SMC Bot - Loi</b>\n\n"
+                f"Chi tiet: {str(e)[:200]}\n"
+                f"<i>{datetime.now().strftime('%d/%m/%Y %H:%M')} (GMT+7)</i>"
+            )
+        except: pass
         time.sleep(60)
