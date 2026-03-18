@@ -1,0 +1,253 @@
+import requests
+import pandas as pd
+import numpy as np
+import time
+import os
+from datetime import datetime, timedelta
+
+# ==========================================
+# CONFIG - ĐỌC TỪ ENVIRONMENT VARIABLES
+# ==========================================
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+INTERVAL         = os.environ.get("INTERVAL", "15m")
+CHECK_SECS       = int(os.environ.get("CHECK_SECS", "450"))
+RR               = float(os.environ.get("RR", "2.0"))
+
+# ==========================================
+# TELEGRAM
+# ==========================================
+def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[TELEGRAM] {msg[:80]}...")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "parse_mode": "HTML"
+        }, timeout=10)
+    except Exception as e:
+        print(f"Telegram loi: {e}")
+
+# ==========================================
+# DATA FETCH
+# ==========================================
+def fetch_data(interval="15m", candles=500):
+    url = "https://fapi.binance.com/fapi/v1/klines"
+    try:
+        r = requests.get(url, params={
+            "symbol": "XAUUSDT",
+            "interval": interval,
+            "limit": candles
+        }, timeout=10)
+        raw = r.json()
+        if not raw or isinstance(raw, dict): return None
+        df = pd.DataFrame(raw, columns=[
+            'ts','open','high','low','close','volume',
+            'ct','qv','n','tb','tq','ig'])
+        df['datetime'] = pd.to_datetime(df['ts'].astype(float), unit='ms') + pd.Timedelta(hours=7)
+        for col in ['open','high','low','close','volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df[['datetime','open','high','low','close','volume']].dropna().reset_index(drop=True)
+    except Exception as e:
+        print(f"Fetch loi: {e}")
+        return None
+
+# ==========================================
+# INDICATORS
+# ==========================================
+def ema(s, n): return s.ewm(span=n, adjust=False).mean()
+
+def rsi_calc(s, n=14):
+    d = s.diff()
+    g = d.where(d>0, 0).ewm(alpha=1/n, adjust=False).mean()
+    l = (-d.where(d<0, 0)).ewm(alpha=1/n, adjust=False).mean()
+    return 100 - (100 / (1 + g/l))
+
+def add_indicators(df):
+    df['ema50']  = ema(df['close'], 50)
+    df['ema200'] = ema(df['close'], 200)
+    df['rsi']    = rsi_calc(df['close'], 14)
+    df['tr']     = np.maximum(df['high']-df['low'],
+                   np.maximum(abs(df['high']-df['close'].shift(1)),
+                              abs(df['low'] -df['close'].shift(1))))
+    df['atr']    = df['tr'].ewm(span=14, adjust=False).mean()
+    return df
+
+# ==========================================
+# SMC CORE
+# ==========================================
+def swing_highs(df, n=3):
+    idx = []
+    for i in range(n, len(df)-n):
+        if all(df['high'].iloc[i]>df['high'].iloc[i-j] for j in range(1,n+1)) and \
+           all(df['high'].iloc[i]>df['high'].iloc[i+j] for j in range(1,n+1)):
+            idx.append(i)
+    return idx
+
+def swing_lows(df, n=3):
+    idx = []
+    for i in range(n, len(df)-n):
+        if all(df['low'].iloc[i]<df['low'].iloc[i-j] for j in range(1,n+1)) and \
+           all(df['low'].iloc[i]<df['low'].iloc[i+j] for j in range(1,n+1)):
+            idx.append(i)
+    return idx
+
+def detect_structure(df, sh, sl, i):
+    c = df['close'].iloc[i]
+    psh = [h for h in sh if h < i-1]
+    psl = [l for l in sl if l < i-1]
+    if not psh or not psl: return None
+    if c > df['high'].iloc[max(psh)]: return "BULL"
+    if c < df['low'].iloc[max(psl)]:  return "BEAR"
+    return None
+
+def find_ob(df, sig, i, lookback=20):
+    atr   = df['atr'].iloc[i]
+    start = max(0, i-lookback)
+    if sig == "BULL":
+        for j in range(i-1, start-1, -1):
+            o,c_,h_,l_ = df['open'].iloc[j],df['close'].iloc[j],df['high'].iloc[j],df['low'].iloc[j]
+            body = abs(c_-o); rng = h_-l_
+            if c_<o and rng>0 and body/rng>0.35 and body>atr*0.25:
+                if not any(df['close'].iloc[k]<l_ for k in range(j+1,i)):
+                    return {'type':'BULL_OB','hi':h_,'lo':l_,'mid':(h_+l_)/2}
+    elif sig == "BEAR":
+        for j in range(i-1, start-1, -1):
+            o,c_,h_,l_ = df['open'].iloc[j],df['close'].iloc[j],df['high'].iloc[j],df['low'].iloc[j]
+            body = abs(c_-o); rng = h_-l_
+            if c_>o and rng>0 and body/rng>0.35 and body>atr*0.25:
+                if not any(df['close'].iloc[k]>h_ for k in range(j+1,i)):
+                    return {'type':'BEAR_OB','hi':h_,'lo':l_,'mid':(h_+l_)/2}
+    return None
+
+def bull_confirm(df, i):
+    o,c_,h_,l_ = df['open'].iloc[i],df['close'].iloc[i],df['high'].iloc[i],df['low'].iloc[i]
+    po,pc = df['open'].iloc[i-1],df['close'].iloc[i-1]
+    body=c_-o; rng=h_-l_
+    if pc<po and c_>o and o<=pc and c_>=po: return True
+    if c_>o and rng>0 and body/rng>0.55 and c_>l_+rng*0.6: return True
+    return False
+
+def bear_confirm(df, i):
+    o,c_,h_,l_ = df['open'].iloc[i],df['close'].iloc[i],df['high'].iloc[i],df['low'].iloc[i]
+    po,pc = df['open'].iloc[i-1],df['close'].iloc[i-1]
+    body=o-c_; rng=h_-l_
+    if pc>po and c_<o and o>=pc and c_<=po: return True
+    if c_<o and rng>0 and body/rng>0.55 and c_<h_-rng*0.6: return True
+    return False
+
+def valid_long(df, i, ob):
+    c=df['close'].iloc[i]; r=df['rsi'].iloc[i]
+    if c < df['ema200'].iloc[i]: return False
+    if r<35 or r>70: return False
+    if df['low'].iloc[i] > ob['hi']: return False
+    return True
+
+def valid_short(df, i, ob):
+    c=df['close'].iloc[i]; r=df['rsi'].iloc[i]
+    if c > df['ema200'].iloc[i]: return False
+    if r<30 or r>65: return False
+    if df['high'].iloc[i] < ob['lo']: return False
+    return True
+
+def sltp_long(df, i, ob):
+    atr=df['atr'].iloc[i]; entry=ob['mid']
+    sl=ob['lo']-atr*0.5; risk=entry-sl
+    if risk<=0 or risk>atr*3: return None,None,None
+    return entry, sl, entry+risk*RR
+
+def sltp_short(df, i, ob):
+    atr=df['atr'].iloc[i]; entry=ob['mid']
+    sl=ob['hi']+atr*0.5; risk=sl-entry
+    if risk<=0 or risk>atr*3: return None,None,None
+    return entry, sl, entry-risk*RR
+
+def scan_signal(df):
+    sh = swing_highs(df, n=3)
+    sl = swing_lows(df,  n=3)
+    for i in range(len(df)-1, max(len(df)-80, 10), -1):
+        sig = detect_structure(df, sh, sl, i)
+        if not sig: continue
+        ob = find_ob(df, sig, i, lookback=20)
+        if not ob: continue
+        if ob['type']=='BULL_OB' and valid_long(df,i,ob) and bull_confirm(df,i):
+            e,sl_,tp = sltp_long(df,i,ob)
+            if e: return {'side':'LONG','entry':e,'sl':sl_,'tp':tp,'candle_time':str(df['datetime'].iloc[i])}
+        elif ob['type']=='BEAR_OB' and valid_short(df,i,ob) and bear_confirm(df,i):
+            e,sl_,tp = sltp_short(df,i,ob)
+            if e: return {'side':'SHORT','entry':e,'sl':sl_,'tp':tp,'candle_time':str(df['datetime'].iloc[i])}
+    return None
+
+# ==========================================
+# FORMAT TIN TELEGRAM
+# ==========================================
+def format_msg(signal, price, tf):
+    side   = signal['side']
+    emoji  = "🟢" if side=="LONG" else "🔴"
+    action = "MUA (LONG)" if side=="LONG" else "BAN (SHORT)"
+    entry  = round(signal['entry'], 2)
+    sl     = round(signal['sl'], 2)
+    tp     = round(signal['tp'], 2)
+    rr_r   = round(abs(tp-entry)/max(abs(entry-sl),0.01), 2)
+    now    = datetime.now().strftime('%d/%m/%Y %H:%M')
+    return (
+        f"{emoji} <b>TIN HIEU SMC - XAUUSDT {tf}</b>\n\n"
+        f"Lenh      : <b>{action}</b>\n"
+        f"Gia HT    : <b>{price}</b>\n"
+        f"Entry     : <b>{entry}</b>\n"
+        f"Stop Loss : <b>{sl}</b>\n"
+        f"Take Profit: <b>{tp}</b>\n"
+        f"R:R       : <b>1:{rr_r}</b>\n\n"
+        f"<i>{now} (GMT+7)</i>\n"
+        f"<i>Chi tham khao, tu xac nhan truoc khi vao lenh</i>"
+    )
+
+# ==========================================
+# MAIN LOOP
+# ==========================================
+print(f"Bot SMC khoi dong | {INTERVAL} | Check moi {CHECK_SECS}s")
+send_telegram(
+    f"<b>Bot SMC XAUUSDT {INTERVAL} da khoi dong</b>\n"
+    f"Check moi {CHECK_SECS//60} phut\n"
+    f"{datetime.now().strftime('%d/%m/%Y %H:%M')} (GMT+7)"
+)
+
+last_signal_key = None
+
+while True:
+    try:
+        now_str = datetime.now().strftime('%H:%M:%S')
+        df = fetch_data(INTERVAL, candles=500)
+
+        if df is None:
+            print(f"[{now_str}] Khong tai duoc data")
+            time.sleep(60)
+            continue
+
+        df     = add_indicators(df)
+        price  = round(df['close'].iloc[-1], 2)
+        signal = scan_signal(df)
+
+        if signal:
+            sig_key = f"{signal['side']}_{signal['candle_time']}"
+            if sig_key != last_signal_key:
+                msg = format_msg(signal, price, INTERVAL)
+                send_telegram(msg)
+                print(f"[{now_str}] TIN HIEU {signal['side']} | Entry:{round(signal['entry'],2)} SL:{round(signal['sl'],2)} TP:{round(signal['tp'],2)}")
+                last_signal_key = sig_key
+            else:
+                print(f"[{now_str}] Gia:{price} | Tin hieu cu ({signal['side']}) - bo qua")
+        else:
+            print(f"[{now_str}] Gia:{price} | Chua co tin hieu")
+
+        time.sleep(CHECK_SECS)
+
+    except KeyboardInterrupt:
+        print("\nBot dung.")
+        break
+    except Exception as e:
+        print(f"[{now_str}] Loi: {e}")
+        time.sleep(60)
