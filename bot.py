@@ -35,24 +35,54 @@ def send_telegram(msg):
 # DATA FETCH
 # ==========================================
 def fetch_data(interval="15m", candles=500):
-    url = "https://fapi.binance.com/fapi/v1/klines"
+    """Dùng Yahoo Finance - không bị block"""
+    # Map interval sang Yahoo format
+    yf_map = {
+        "1m":"1m","3m":"2m","5m":"5m","15m":"15m",
+        "30m":"30m","1h":"60m","4h":"60m"
+    }
+    yf_interval = yf_map.get(interval, "15m")
+    # Tính period cần thiết
+    period_map = {
+        "1m":"7d","2m":"60d","5m":"60d","15m":"60d",
+        "30m":"60d","60m":"730d"
+    }
+    period = period_map.get(yf_interval, "60d")
+
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+    params = {
+        "interval": yf_interval,
+        "range":    period,
+        "events":   "history"
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
     try:
-        r = requests.get(url, params={
-            "symbol": "XAUUSDT",
-            "interval": interval,
-            "limit": candles
-        }, timeout=10)
+        r   = requests.get(url, params=params, headers=headers, timeout=15)
         raw = r.json()
-        if not raw or isinstance(raw, dict): return None
-        df = pd.DataFrame(raw, columns=[
-            'ts','open','high','low','close','volume',
-            'ct','qv','n','tb','tq','ig'])
-        df['datetime'] = pd.to_datetime(df['ts'].astype(float), unit='ms') + pd.Timedelta(hours=7)
-        for col in ['open','high','low','close','volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        return df[['datetime','open','high','low','close','volume']].dropna().reset_index(drop=True)
+        result = raw.get("chart", {}).get("result", [])
+        if not result: 
+            print(f"Yahoo tra ve rong")
+            return None
+        ts     = result[0]["timestamp"]
+        ohlcv  = result[0]["indicators"]["quote"][0]
+        df = pd.DataFrame({
+            "datetime": pd.to_datetime(ts, unit="s") + pd.Timedelta(hours=7),
+            "open":     ohlcv["open"],
+            "high":     ohlcv["high"],
+            "low":      ohlcv["low"],
+            "close":    ohlcv["close"],
+            "volume":   ohlcv["volume"]
+        })
+        df = df.dropna().reset_index(drop=True)
+        # Lấy N nến cuối
+        df = df.tail(candles).reset_index(drop=True)
+        print(f"Data OK: {len(df)} nen | GC=F (Yahoo)")
+        return df
     except Exception as e:
-        print(f"Fetch loi: {e}")
+        print(f"Yahoo loi: {e}")
         return None
 
 # ==========================================
