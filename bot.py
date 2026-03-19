@@ -500,18 +500,17 @@ class DemoTracker:
         self.lich_su   = []     # lịch sử lệnh đã đóng
 
     def mo_lenh(self, signal, price):
-        """Mở lệnh demo theo tín hiệu"""
+        """Mở lệnh demo theo tín hiệu - dùng entry từ tín hiệu SMC"""
         if self.lenh_mo is not None:
-            return None  # đã có lệnh, bỏ qua
+            return None
 
         side   = signal['side']
-        entry  = round(price, 2)   # dùng giá thị trường hiện tại
+        entry  = round(signal['entry'], 2)   # dùng entry từ tín hiệu, không phải giá thị trường
         sl     = round(signal['sl'], 2)
         tp     = round(signal['tp'], 2)
         risk_r = abs(entry - sl)
         tp_r   = abs(tp - entry)
 
-        # PnL khi SL/TP tính bằng USD
         pnl_sl = round(-abs(risk_r / entry * self.notional), 4)
         pnl_tp = round( abs(tp_r  / entry * self.notional), 4)
 
@@ -655,7 +654,7 @@ print(f"Bot SMC khoi dong | {INTERVAL}")
 send_telegram(format_startup_msg(INTERVAL, 15))
 
 last_signal_key     = None
-last_health_time    = now_vn() - timedelta(minutes=15)  # gửi ngay lần đầu
+last_health_time    = now_vn()                        # không gửi ngay, chờ 15 phút
 last_demo_status_t  = now_vn() - timedelta(minutes=1)
 last_backtest_date  = None
 HEALTH_INTERVAL     = 15 * 60   # [2] health mỗi 15 phút
