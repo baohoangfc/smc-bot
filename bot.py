@@ -74,38 +74,47 @@ def send_telegram(msg):
 # DATA FETCH
 # ==========================================
 def fetch_data(interval="15m", candles=500):
-    """Lấy dữ liệu XAUUSDT từ Binance Futures"""
-    binance_map = {
-        "1m":"1m","3m":"3m","5m":"5m","15m":"15m",
-        "30m":"30m","1h":"1h","4h":"4h","1d":"1d"
+    """Lấy dữ liệu GOLD từ Yahoo Finance (GC=F) - không bị block trên Railway"""
+    yf_map = {
+        "1m":"1m","3m":"2m","5m":"5m","15m":"15m",
+        "30m":"30m","1h":"60m","4h":"60m"
     }
-    b_interval = binance_map.get(interval, "15m")
+    yf_interval = yf_map.get(interval, "15m")
+    period_map  = {
+        "1m":"7d","2m":"60d","5m":"60d","15m":"60d",
+        "30m":"60d","60m":"730d"
+    }
+    period = period_map.get(yf_interval, "60d")
 
-    url = "https://fapi.binance.com/fapi/v1/klines"
-    params = {
-        "symbol":   "XAUUSDT",
-        "interval": b_interval,
-        "limit":    candles
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+    params  = {"interval": yf_interval, "range": period, "events": "history"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
     }
     try:
-        r   = requests.get(url, params=params, timeout=15)
-        raw = r.json()
-        if not isinstance(raw, list) or len(raw) == 0:
-            print(f"Binance tra ve rong: {raw}")
+        r      = requests.get(url, params=params, headers=headers, timeout=15)
+        raw    = r.json()
+        result = raw.get("chart", {}).get("result", [])
+        if not result:
+            print(f"Yahoo tra ve rong")
             return None
-        df = pd.DataFrame(raw, columns=[
-            "open_time","open","high","low","close","volume",
-            "close_time","quote_vol","trades","taker_buy_base",
-            "taker_buy_quote","ignore"
-        ])
-        df["datetime"] = pd.to_datetime(df["open_time"].astype(float), unit="ms") + pd.Timedelta(hours=7)
-        for col in ["open","high","low","close","volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df[["datetime","open","high","low","close","volume"]].dropna().reset_index(drop=True)
-        print(f"Data OK: {len(df)} nen | XAUUSDT Binance | Gia: {round(df['close'].iloc[-1],2)}")
+        ts    = result[0]["timestamp"]
+        ohlcv = result[0]["indicators"]["quote"][0]
+        df = pd.DataFrame({
+            "datetime": pd.to_datetime(ts, unit="s") + pd.Timedelta(hours=7),
+            "open":   ohlcv["open"],
+            "high":   ohlcv["high"],
+            "low":    ohlcv["low"],
+            "close":  ohlcv["close"],
+            "volume": ohlcv["volume"]
+        })
+        df = df.dropna().reset_index(drop=True)
+        df = df.tail(candles).reset_index(drop=True)
+        print(f"Data OK: {len(df)} nen | GC=F Yahoo | Gia: {round(df['close'].iloc[-1],2)}")
         return df
     except Exception as e:
-        print(f"Binance loi: {e}")
+        print(f"Yahoo loi: {e}")
         return None
 
 # ==========================================
