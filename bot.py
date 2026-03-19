@@ -118,19 +118,34 @@ def fetch_data(interval="15m", candles=500):
         return None
 
 def fetch_latest_price():
-    """Lấy giá GC=F mới nhất - nhẹ, nhanh"""
+    """Lấy giá XAUUSDT realtime từ Binance spot (không bị block như futures)"""
+    sources = [
+        # Binance spot - thường không bị block
+        ("https://api.binance.com/api/v3/ticker/price", {"symbol": "XAUUSDT"}),
+        # Backup: Yahoo GC=F
+        ("https://query1.finance.yahoo.com/v8/finance/chart/GC=F", {"interval":"1m","range":"1d"}),
+    ]
+    # Thử Binance spot trước
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-        r   = requests.get(url, params={"interval":"1m","range":"1d"},
-                           headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
+        r   = requests.get(sources[0][0], params=sources[0][1], timeout=8)
+        raw = r.json()
+        if "price" in raw:
+            return round(float(raw["price"]), 2)
+    except:
+        pass
+    # Fallback Yahoo
+    try:
+        r      = requests.get(sources[1][0], params=sources[1][1],
+                              headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
         raw    = r.json()
         result = raw.get("chart",{}).get("result",[])
-        if not result: return None
-        closes = result[0]["indicators"]["quote"][0]["close"]
-        closes = [x for x in closes if x is not None]
-        return round(closes[-1], 2) if closes else None
+        if result:
+            closes = result[0]["indicators"]["quote"][0]["close"]
+            closes = [x for x in closes if x is not None]
+            if closes: return round(closes[-1], 2)
     except:
-        return None
+        pass
+    return None
 
 def fetch_xauusd_price():
     """Ước tính XAUUSD spot = GC=F + 30"""
