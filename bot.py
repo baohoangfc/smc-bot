@@ -74,41 +74,38 @@ def send_telegram(msg):
 # DATA FETCH
 # ==========================================
 def fetch_data(interval="15m", candles=500):
-    """Lấy dữ liệu GOLD từ BingX - NCCOGOLD2USD-USDT"""
-    bingx_map = {
+    """Lấy dữ liệu XAUUSDT từ Binance Futures"""
+    binance_map = {
         "1m":"1m","3m":"3m","5m":"5m","15m":"15m",
         "30m":"30m","1h":"1h","4h":"4h","1d":"1d"
     }
-    b_interval = bingx_map.get(interval, "15m")
+    b_interval = binance_map.get(interval, "15m")
 
-    url = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
+    url = "https://fapi.binance.com/fapi/v1/klines"
     params = {
-        "symbol":   "NCCOGOLD2USD-USDT",
+        "symbol":   "XAUUSDT",
         "interval": b_interval,
         "limit":    candles
     }
     try:
         r   = requests.get(url, params=params, timeout=15)
         raw = r.json()
-        if raw.get("code") != 0:
-            print(f"BingX loi: {raw.get('msg')}")
+        if not isinstance(raw, list) or len(raw) == 0:
+            print(f"Binance tra ve rong: {raw}")
             return None
-        klines = raw.get("data", [])
-        if not klines:
-            print("BingX tra ve rong")
-            return None
-        df = pd.DataFrame(klines, columns=[
+        df = pd.DataFrame(raw, columns=[
             "open_time","open","high","low","close","volume",
-            "close_time","quote_volume"
+            "close_time","quote_vol","trades","taker_buy_base",
+            "taker_buy_quote","ignore"
         ])
         df["datetime"] = pd.to_datetime(df["open_time"].astype(float), unit="ms") + pd.Timedelta(hours=7)
         for col in ["open","high","low","close","volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df[["datetime","open","high","low","close","volume"]].dropna().reset_index(drop=True)
-        print(f"Data OK: {len(df)} nen | GOLD (BingX) | Gia: {round(df['close'].iloc[-1],2)}")
+        print(f"Data OK: {len(df)} nen | XAUUSDT Binance | Gia: {round(df['close'].iloc[-1],2)}")
         return df
     except Exception as e:
-        print(f"BingX loi: {e}")
+        print(f"Binance loi: {e}")
         return None
 
 # ==========================================
