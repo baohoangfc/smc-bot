@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import time
 import os
+import json
 from datetime import datetime, timedelta
 
 import threading
@@ -391,58 +392,142 @@ def run_daily_backtest(df, target_date=None):
     return trades
 
 
-def format_daily_backtest_msg(trades, target_date):
-    ngay = target_date.strftime('%d/%m/%Y')
-    gio  = now_vn().strftime('%H:%M')
+def load_history():
+    """Load lịch sử lãi/lỗ từ file"""
+    try:
+        if os.path.exists("pnl_history.json"):
+            with open("pnl_history.json", "r") as f:
+                return json.load(f)
+    except:
+        pass
+    return {"days": [], "total_r": 0, "total_win": 0, "total_loss": 0, "total_be": 0}
 
-    if not trades:
-        return (
-            f"📋 <b>Backtest trong ngày {ngay}</b>\n\n"
-            f"Không có lệnh nào được kích hoạt hôm nay.\n"
-            f"<i>⏰ Cập nhật lúc {gio} (GMT+7)</i>"
-        )
+def save_history(history):
+    """Lưu lịch sử lãi/lỗ vào file"""
+    try:
+        with open("pnl_history.json", "w") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Loi luu history: {e}")
 
-    thang  = [t for t in trades if t.get('result') == 'WIN']
-    thua   = [t for t in trades if t.get('result') == 'LOSS']
-    be     = [t for t in trades if t.get('result') == 'BE']
-    total_r = sum(t.get('pnl_r', 0) for t in trades)
+def format_daily_backtest_msg(trades, target_date, demo_tracker=None):
+    ngay    = target_date.strftime('%d/%m/%Y')
+    thu_map = {0:"Thứ 2",1:"Thứ 3",2:"Thứ 4",3:"Thứ 5",4:"Thứ 6",5:"Thứ 7",6:"CN"}
+    thu     = thu_map.get(target_date.weekday(), "")
+    gio     = now_vn().strftime('%H:%M')
+
+    # Load + cập nhật lịch sử
+    history = load_history()
+
+    thang   = [t for t in trades if t.get('result') == 'WIN']
+    thua    = [t for t in trades if t.get('result') == 'LOSS']
+    be      = [t for t in trades if t.get('result') == 'BE']
+    total_r = round(sum(t.get('pnl_r', 0) for t in trades), 2)
     winrate = round(len(thang) / len(trades) * 100) if trades else 0
 
-    icon_total = "🟢" if total_r > 0 else ("🔴" if total_r < 0 else "⚪")
-    lines = [
-        f"📋 <b>Backtest trong ngày {ngay}</b>\n",
-        f"Tổng lệnh : <b>{len(trades)}</b>  |  Thắng: <b>{len(thang)}</b>  Thua: <b>{len(thua)}</b>  BE: <b>{len(be)}</b>",
-        f"Winrate   : <b>{winrate}%</b>",
-        f"Tổng R    : {icon_total} <b>{'+' if total_r>0 else ''}{total_r}R</b>\n",
-        "─────────────────────",
-    ]
+    demo_pnl   = round(demo_tracker.tong_pnl(), 2) if demo_tracker else 0
+    demo_lenh  = len(demo_tracker.lich_su) if demo_tracker else 0
+    demo_thang = len([t for t in (demo_tracker.lich_su if demo_tracker else []) if t.get('pnl_final', 0) > 0])
+    demo_thua  = len([t for t in (demo_tracker.lich_su if demo_tracker else []) if t.get('pnl_final', 0) < 0])
 
-    for idx, t in enumerate(trades, 1):
-        res    = t.get('result', '?')
-        emoji  = "✅" if res=='WIN' else ("❌" if res=='LOSS' else ("⚪" if res=='BE' else "⏱"))
-        side   = "MUA" if t['type']=='LONG' else "BÁN"
-        # Lấy giờ vào lệnh
-        try:
-            gio_vao = pd.to_datetime(t['entry_time']).strftime('%H:%M')
-        except:
-            gio_vao = '--:--'
-        try:
-            gio_ra = pd.to_datetime(t.get('exit_time','')).strftime('%H:%M')
-        except:
-            gio_ra = '--:--'
+    day_record = {
+        "date": ngay, "trades": len(trades),
+        "win": len(thang), "loss": len(thua), "be": len(be),
+        "total_r": total_r, "winrate": winrate,
+        "demo_pnl": demo_pnl, "demo_trades": demo_lenh,
+    }
+    existing = [i for i, d in enumerate(history["days"]) if d.get("date") == ngay]
+    if existing:
+        history["days"][existing[0]] = day_record
+    else:
+        history["days"].append(day_record)
 
-        pnl_r = t.get('pnl_r', 0)
-        pnl_str = f"+{pnl_r}R" if pnl_r > 0 else (f"{pnl_r}R" if pnl_r < 0 else "0R (BE)")
+    history["total_r"]       = round(sum(d.get("total_r", 0) for d in history["days"]), 2)
+    history["total_win"]     = sum(d.get("win", 0)  for d in history["days"])
+    history["total_loss"]    = sum(d.get("loss", 0) for d in history["days"])
+    history["total_be"]      = sum(d.get("be", 0)   for d in history["days"])
+    history["demo_total_pnl"]= round(sum(d.get("demo_pnl", 0) for d in history["days"]), 2)
+    save_history(history)
 
-        lines.append(
-            f"{emoji} <b>Lệnh {idx}: {side}</b>  [{gio_vao} → {gio_ra}]\n"
-            f"   Vào: <b>{t['entry']}</b>  SL: <b>{t['sl']}</b>  TP: <b>{t['tp']}</b>\n"
-            f"   Kết quả: <b>{res}</b>  ({pnl_str})"
-        )
+    # ── Helpers ──────────────────────────────
+    def pnl_icon(v): return "🟢" if v > 0 else ("🔴" if v < 0 else "⚪")
+    def r_fmt(v):    return f"+{v}R" if v > 0 else (f"{v}R" if v != 0 else "0R")
+    def usd_fmt(v):  return f"+${v}" if v > 0 else (f"-${abs(v)}" if v < 0 else "$0")
 
-    lines.append(f"\n<i>⏰ Cập nhật lúc {gio} (GMT+7)</i>")
-    lines.append(f"<i>⚠️ Chỉ tham khảo, không phải lệnh thật</i>")
-    return "\n".join(lines)
+    # ── Thanh kết quả trực quan ───────────────
+    bar = ("✅" * len(thang) + "❌" * len(thua) + "⬜" * len(be)) or "➖"
+
+    # ── Winrate bar ───────────────────────────
+    if trades:
+        filled = round(winrate / 10)
+        wr_bar = "█" * filled + "░" * (10 - filled)
+        wr_bar_str = f"[{wr_bar}] {winrate}%"
+    else:
+        wr_bar_str = "Không có lệnh"
+
+    # ── Header ────────────────────────────────
+    msg  = f"╔══════════════════════╗\n"
+    msg += f"║  📊 BÁO CÁO NGÀY  {thu}  ║\n"
+    msg += f"║     {ngay}      ║\n"
+    msg += f"╚══════════════════════╝\n\n"
+
+    # ── Backtest section ──────────────────────
+    msg += f"📈 <b>BACKTEST SMC</b>\n"
+    msg += f"{'─'*24}\n"
+
+    if not trades:
+        msg += "📭 Không có lệnh nào hôm nay\n"
+    else:
+        msg += f"{bar}\n\n"
+        msg += f"  Tổng lệnh  : <b>{len(trades)}</b>\n"
+        msg += f"  ✅ Thắng   : <b>{len(thang)}</b>  ❌ Thua : <b>{len(thua)}</b>  ⬜ BE : <b>{len(be)}</b>\n"
+        msg += f"  Winrate    : <b>{wr_bar_str}</b>\n"
+        msg += f"  Kết quả    : {pnl_icon(total_r)} <b>{r_fmt(total_r)}</b>\n\n"
+
+        msg += f"📋 <b>Chi tiết lệnh:</b>\n"
+        for idx, t in enumerate(trades, 1):
+            res   = t.get('result','?')
+            emoji = "✅" if res=='WIN' else ("❌" if res=='LOSS' else ("⬜" if res=='BE' else "⏱"))
+            side  = "📈 MUA" if t['type']=='LONG' else "📉 BÁN"
+            try: gv = pd.to_datetime(t['entry_time']).strftime('%H:%M')
+            except: gv = '--:--'
+            try: gr = pd.to_datetime(t.get('exit_time','')).strftime('%H:%M')
+            except: gr = '--:--'
+            pnl_r  = t.get('pnl_r', 0)
+            pr_str = r_fmt(pnl_r) if pnl_r != 0 else "BE"
+            msg += (
+                f"\n  {emoji} <b>#{idx} {side}</b>  {gv} → {gr}\n"
+                f"     Entry: <b>{t['entry']}</b>  SL: <b>{t['sl']}</b>  TP: <b>{t['tp']}</b>\n"
+                f"     Kết quả: <b>{pr_str}</b>\n"
+            )
+
+    # ── Demo section ──────────────────────────
+    msg += f"\n{'─'*24}\n"
+    msg += f"💰 <b>DEMO TRADING</b>  ($10 × 200x)\n"
+    msg += f"{'─'*24}\n"
+    if demo_lenh == 0:
+        msg += "  Chưa có lệnh demo hôm nay\n"
+    else:
+        msg += f"  Số lệnh  : <b>{demo_lenh}</b>  (✅{demo_thang}  ❌{demo_thua})\n"
+        msg += f"  Lãi/Lỗ  : {pnl_icon(demo_pnl)} <b>{usd_fmt(demo_pnl)}</b>\n"
+
+    # ── Tổng tích lũy ─────────────────────────
+    total_trades = history['total_win'] + history['total_loss'] + history['total_be']
+    total_wr     = round(history['total_win'] / total_trades * 100) if total_trades > 0 else 0
+    cum_dpnl     = history.get('demo_total_pnl', 0)
+    n_days       = len(history['days'])
+
+    msg += f"\n{'═'*24}\n"
+    msg += f"📆 <b>TỔNG TÍCH LŨY ({n_days} ngày)</b>\n"
+    msg += f"{'─'*24}\n"
+    msg += f"  Tổng lệnh  : <b>{total_trades}</b>\n"
+    msg += f"  ✅ {history['total_win']}  ❌ {history['total_loss']}  ⬜ {history['total_be']}  |  WR: <b>{total_wr}%</b>\n"
+    msg += f"  Backtest   : {pnl_icon(history['total_r'])} <b>{r_fmt(history['total_r'])}</b>\n"
+    msg += f"  Demo P&L   : {pnl_icon(cum_dpnl)} <b>{usd_fmt(cum_dpnl)}</b>\n"
+    msg += f"{'═'*24}\n"
+    msg += f"<i>⏰ {gio} (GMT+7)  |  Chỉ tham khảo</i>"
+
+    return msg
 
 
 # ==========================================
@@ -870,7 +955,7 @@ while True:
         if vn_now.hour == BACKTEST_HOUR and last_backtest_date != today:
             print(f"[{now_str}] Dang chay backtest trong ngay {today}...")
             bt_trades = run_daily_backtest(df, target_date=today)
-            bt_msg    = format_daily_backtest_msg(bt_trades, today)
+            bt_msg    = format_daily_backtest_msg(bt_trades, today, demo_tracker=demo)
             send_telegram(bt_msg)
             last_backtest_date = today
             print(f"[{now_str}] Da gui backtest {today}: {len(bt_trades)} lenh")
