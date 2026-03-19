@@ -645,15 +645,22 @@ def format_demo_status_msg(demo, price):
 # ==========================================
 # MAIN LOOP
 # ==========================================
-print(f"Bot SMC khoi dong | {INTERVAL} | Chi ban phut :00,:05,:10,...")
-send_telegram(format_startup_msg(INTERVAL, 5))
+# Lịch bắn Telegram:
+# [1] Tín hiệu LONG/SHORT   → bắn NGAY khi phát hiện (không chờ phút :x0/:x5)
+# [2] Health check           → mỗi 15 phút
+# [3] Mở/Đóng lệnh demo     → bắn NGAY khi mở/dính SL/TP
+# [4] Trạng thái lệnh đang mở → mỗi 1 phút (nếu có lệnh đang mở)
 
-last_signal_key      = None
-last_status_time     = now_vn() - timedelta(minutes=10)
-STATUS_INTERVAL      = 10 * 60
-last_checked_min     = -1
-last_backtest_date   = None
-BACKTEST_HOUR        = 20
+print(f"Bot SMC khoi dong | {INTERVAL}")
+send_telegram(format_startup_msg(INTERVAL, 15))
+
+last_signal_key     = None
+last_health_time    = now_vn() - timedelta(minutes=15)  # gửi ngay lần đầu
+last_demo_status_t  = now_vn() - timedelta(minutes=1)
+last_backtest_date  = None
+HEALTH_INTERVAL     = 15 * 60   # [2] health mỗi 15 phút
+DEMO_STATUS_INTERVAL = 1 * 60   # [4] demo status mỗi 1 phút
+BACKTEST_HOUR       = 20
 
 # Khởi tạo Demo Tracker
 demo = DemoTracker(margin=10, leverage=200)
@@ -662,35 +669,24 @@ while True:
     try:
         vn_now  = now_vn()
         now_str = vn_now.strftime('%H:%M:%S')
-        cur_min = vn_now.minute
-
-        # ⏰ BỘ LỌC THỜI GIAN
-        if not is_valid_minute():
-            print(f"[{now_str}] Bo qua (phut :{cur_min:02d})")
-            time.sleep(20)
-            continue
-
-        if cur_min == last_checked_min:
-            time.sleep(20)
-            continue
-        last_checked_min = cur_min
 
         df = fetch_data(INTERVAL, candles=500)
 
         if df is None:
             print(f"[{now_str}] Khong tai duoc data")
-            elapsed = (now_vn() - last_status_time).total_seconds()
-            if elapsed >= STATUS_INTERVAL:
+            elapsed_health = (now_vn() - last_health_time).total_seconds()
+            if elapsed_health >= HEALTH_INTERVAL:
                 send_telegram(format_nodata_msg())
-                last_status_time = now_vn()
-            time.sleep(60)
+                last_health_time = now_vn()
+            time.sleep(30)
             continue
 
-        df     = add_indicators(df)
-        price  = round(df['close'].iloc[-1], 2)
-        signal = scan_signal(df)
+        df    = add_indicators(df)
+        price = round(df['close'].iloc[-1], 2)
 
-        # --- DEMO: Cập nhật lệnh đang mở ---
+        # ==========================================
+        # [3] DEMO - Kiểm tra SL/TP → bắn NGAY
+        # ==========================================
         if demo.lenh_mo is not None:
             trang_thai, lenh_data = demo.cap_nhat(price)
             if trang_thai == 'TP':
@@ -700,16 +696,18 @@ while True:
                 send_telegram(format_demo_close_msg(lenh_data, 'SL'))
                 print(f"[{now_str}] DEMO SL | -${abs(lenh_data['pnl_sl'])}")
 
-        # --- GỬI TÍN HIỆU MỚI + MỞ LỆNH DEMO ---
+        # ==========================================
+        # [1] TÍN HIỆU → scan và bắn NGAY nếu có mới
+        # ==========================================
+        signal = scan_signal(df)
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
-                # Gửi tín hiệu
                 send_telegram(format_signal_msg(signal, price, INTERVAL))
-                print(f"[{now_str}] TIN HIEU {signal['side']} | Entry:{round(signal['entry'],2)}")
+                print(f"[{now_str}] TIN HIEU {signal['side']} @ {round(signal['entry'],2)}")
                 last_signal_key = sig_key
 
-                # Mở lệnh demo nếu chưa có lệnh
+                # [3] Mở lệnh demo NGAY khi có tín hiệu
                 lenh_demo = demo.mo_lenh(signal, price)
                 if lenh_demo:
                     send_telegram(format_demo_open_msg(lenh_demo))
@@ -719,20 +717,29 @@ while True:
         else:
             print(f"[{now_str}] Gia:{price} | Chua co tin hieu")
 
-        # --- GỬI TRẠNG THÁI MỖI 10 PHÚT (gộp cả demo) ---
-        elapsed = (now_vn() - last_status_time).total_seconds()
-        if elapsed >= STATUS_INTERVAL:
-            next_str = (now_vn() + timedelta(minutes=10)).strftime('%H:%M')
-            # Gửi status bot
-            send_telegram(format_status_msg(price, INTERVAL, signal, next_str))
-            # Gửi status demo nếu có lệnh đang mở hoặc có lịch sử
-            if demo.lenh_mo is not None or demo.lich_su:
-                demo.cap_nhat(price)  # cập nhật PnL mới nhất
-                send_telegram(format_demo_status_msg(demo, price))
-            print(f"[{now_str}] Da gui status Telegram")
-            last_status_time = now_vn()
+        # ==========================================
+        # [4] TRẠNG THÁI LỆNH DEMO → mỗi 1 phút nếu đang mở
+        # ==========================================
+        elapsed_demo = (now_vn() - last_demo_status_t).total_seconds()
+        if demo.lenh_mo is not None and elapsed_demo >= DEMO_STATUS_INTERVAL:
+            demo.cap_nhat(price)
+            send_telegram(format_demo_status_msg(demo, price))
+            print(f"[{now_str}] Da gui demo status | PnL tam: ${demo.lenh_mo.get('pnl_now',0)}")
+            last_demo_status_t = now_vn()
 
-        # --- GỬI BACKTEST TRONG NGÀY lúc 20:00 GMT+7 ---
+        # ==========================================
+        # [2] HEALTH CHECK → mỗi 15 phút
+        # ==========================================
+        elapsed_health = (now_vn() - last_health_time).total_seconds()
+        if elapsed_health >= HEALTH_INTERVAL:
+            next_str = (now_vn() + timedelta(minutes=15)).strftime('%H:%M')
+            send_telegram(format_status_msg(price, INTERVAL, signal, next_str))
+            print(f"[{now_str}] Da gui health check")
+            last_health_time = now_vn()
+
+        # ==========================================
+        # BACKTEST TRONG NGÀY → lúc 20:00 GMT+7
+        # ==========================================
         today = vn_now.date()
         if vn_now.hour == BACKTEST_HOUR and last_backtest_date != today:
             print(f"[{now_str}] Dang chay backtest trong ngay {today}...")
@@ -746,7 +753,7 @@ while True:
             demo = DemoTracker(margin=10, leverage=200)
             print(f"[{now_str}] Da reset Demo Tracker cho ngay moi")
 
-        time.sleep(30)
+        time.sleep(30)  # vòng lặp 30s
 
     except KeyboardInterrupt:
         print("\nBot dung.")
