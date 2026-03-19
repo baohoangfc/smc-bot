@@ -74,46 +74,41 @@ def send_telegram(msg):
 # DATA FETCH
 # ==========================================
 def fetch_data(interval="15m", candles=500):
-    yf_map = {
-        "1m":"1m","3m":"2m","5m":"5m","15m":"15m",
-        "30m":"30m","1h":"60m","4h":"60m"
+    """Lấy dữ liệu GOLD từ BingX - NCCOGOLD2USD-USDT"""
+    bingx_map = {
+        "1m":"1m","3m":"3m","5m":"5m","15m":"15m",
+        "30m":"30m","1h":"1h","4h":"4h","1d":"1d"
     }
-    yf_interval = yf_map.get(interval, "15m")
-    period_map = {
-        "1m":"7d","2m":"60d","5m":"60d","15m":"60d",
-        "30m":"60d","60m":"730d"
-    }
-    period = period_map.get(yf_interval, "60d")
+    b_interval = bingx_map.get(interval, "15m")
 
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {"interval": yf_interval, "range": period, "events": "history"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json"
+    url = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
+    params = {
+        "symbol":   "NCCOGOLD2USD-USDT",
+        "interval": b_interval,
+        "limit":    candles
     }
     try:
-        r   = requests.get(url, params=params, headers=headers, timeout=15)
+        r   = requests.get(url, params=params, timeout=15)
         raw = r.json()
-        result = raw.get("chart", {}).get("result", [])
-        if not result:
-            print("Yahoo tra ve rong")
+        if raw.get("code") != 0:
+            print(f"BingX loi: {raw.get('msg')}")
             return None
-        ts    = result[0]["timestamp"]
-        ohlcv = result[0]["indicators"]["quote"][0]
-        df = pd.DataFrame({
-            "datetime": pd.to_datetime(ts, unit="s") + pd.Timedelta(hours=7),
-            "open":  ohlcv["open"],
-            "high":  ohlcv["high"],
-            "low":   ohlcv["low"],
-            "close": ohlcv["close"],
-            "volume":ohlcv["volume"]
-        })
-        df = df.dropna().reset_index(drop=True)
-        df = df.tail(candles).reset_index(drop=True)
-        print(f"Data OK: {len(df)} nen | GC=F")
+        klines = raw.get("data", [])
+        if not klines:
+            print("BingX tra ve rong")
+            return None
+        df = pd.DataFrame(klines, columns=[
+            "open_time","open","high","low","close","volume",
+            "close_time","quote_volume"
+        ])
+        df["datetime"] = pd.to_datetime(df["open_time"].astype(float), unit="ms") + pd.Timedelta(hours=7)
+        for col in ["open","high","low","close","volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df[["datetime","open","high","low","close","volume"]].dropna().reset_index(drop=True)
+        print(f"Data OK: {len(df)} nen | GOLD (BingX) | Gia: {round(df['close'].iloc[-1],2)}")
         return df
     except Exception as e:
-        print(f"Yahoo loi: {e}")
+        print(f"BingX loi: {e}")
         return None
 
 # ==========================================
@@ -421,7 +416,7 @@ def format_signal_msg(signal, price, tf):
     rr_r   = round(abs(tp - entry) / max(abs(entry - sl), 0.01), 2)
     gio    = now_vn().strftime('%d/%m/%Y %H:%M')
     return (
-        f"{emoji} <b>TÍN HIỆU SMC - VÀNG {tf}</b>\n\n"
+        f"{emoji} <b>TÍN HIỆU SMC - GOLD {tf}</b>\n\n"
         f"📌 Lệnh      : <b>{lenh}</b>\n"
         f"💰 Giá hiện tại : <b>{price}</b>\n"
         f"🎯 Vào lệnh  : <b>{entry}</b>\n"
@@ -450,7 +445,7 @@ def format_status_msg(price, tf, signal, next_time_str):
 
     return (
         f"🤖 <b>SMC Bot - Cập nhật {gio} (GMT+7)</b>\n\n"
-        f"Giá VÀNG   : <b>{price}</b>\n"
+        f"Giá GOLD   : <b>{price}</b>\n"
         f"Khung TG   : <b>{tf}</b>\n"
         f"Trạng thái : ✅ Đang chạy\n\n"
         f"{sig_info}\n\n"
@@ -460,7 +455,7 @@ def format_status_msg(price, tf, signal, next_time_str):
 def format_startup_msg(tf, check_min):
     gio = now_vn().strftime('%d/%m/%Y %H:%M')
     return (
-        f"🚀 <b>Bot SMC VÀNG {tf} đã khởi động</b>\n\n"
+        f"🚀 <b>Bot SMC GOLD {tf} đã khởi động</b>\n\n"
         f"✅ Đang chạy bình thường\n"
         f"🔄 Cập nhật mỗi {check_min} phút (các phút :00, :05, :10...)\n"
         f"⏰ {gio} (GMT+7)"
@@ -478,7 +473,7 @@ def format_nodata_msg():
     gio = now_vn().strftime('%d/%m/%Y %H:%M')
     return (
         f"⚠️ <b>SMC Bot - Cảnh báo</b>\n\n"
-        f"Không tải được dữ liệu VÀNG\n"
+        f"Không tải được dữ liệu GOLD\n"
         f"Đang thử lại...\n\n"
         f"<i>⏰ {gio} (GMT+7)</i>"
     )
@@ -500,17 +495,26 @@ class DemoTracker:
         self.lich_su   = []     # lịch sử lệnh đã đóng
 
     def mo_lenh(self, signal, price):
-        """Mở lệnh demo theo tín hiệu - dùng entry từ tín hiệu SMC"""
+        """Mở lệnh demo tại giá thị trường hiện tại (market order)"""
         if self.lenh_mo is not None:
             return None
 
-        side   = signal['side']
-        entry  = round(signal['entry'], 2)   # dùng entry từ tín hiệu, không phải giá thị trường
-        sl     = round(signal['sl'], 2)
-        tp     = round(signal['tp'], 2)
+        side  = signal['side']
+        entry = round(price, 2)       # vào ngay tại giá thị trường
+        sl    = round(signal['sl'], 2)
+        tp    = round(signal['tp'], 2)
+
+        # Điều chỉnh SL/TP theo tỉ lệ từ entry thực tế
+        risk  = abs(signal['entry'] - signal['sl'])
+        if side == 'LONG':
+            sl = round(entry - risk, 2)
+            tp = round(entry + risk * RR, 2)
+        else:
+            sl = round(entry + risk, 2)
+            tp = round(entry - risk * RR, 2)
+
         risk_r = abs(entry - sl)
         tp_r   = abs(tp - entry)
-
         pnl_sl = round(-abs(risk_r / entry * self.notional), 4)
         pnl_tp = round( abs(tp_r  / entry * self.notional), 4)
 
@@ -579,7 +583,7 @@ def format_demo_open_msg(lenh):
     emoji = "🟢" if side == 'LONG' else "🔴"
     loai  = "MUA (LONG)" if side == 'LONG' else "BÁN (SHORT)"
     return (
-        f"{emoji} <b>DEMO MỞ LỆNH - VÀNG</b>\n\n"
+        f"{emoji} <b>DEMO MỞ LỆNH - GOLD</b>\n\n"
         f"📌 Lệnh     : <b>{loai}</b>\n"
         f"💰 Vốn      : <b>${lenh['margin']} × {int(lenh['leverage'])}x = ${lenh['notional']}</b>\n"
         f"🎯 Vào lệnh : <b>{lenh['entry']}</b>\n"
@@ -617,7 +621,7 @@ def format_demo_status_msg(demo, price):
     tong_str = f"+${tong}" if tong >= 0 else f"-${abs(tong)}"
     tong_icon = "🟢" if tong > 0 else ("🔴" if tong < 0 else "⚪")
 
-    lines = [f"📊 <b>DEMO Trading - Trạng thái</b>\n"]
+    lines = [f"📊 <b>DEMO GOLD - Trạng thái</b>\n"]
 
     if l:
         side    = l['side']
@@ -741,6 +745,11 @@ while True:
         if elapsed_health >= HEALTH_INTERVAL:
             next_str = (now_vn() + timedelta(minutes=15)).strftime('%H:%M')
             send_telegram(format_status_msg(price, INTERVAL, signal, next_str))
+            # Gửi kèm trạng thái demo nếu có lệnh đang mở
+            if demo.lenh_mo is not None:
+                demo.cap_nhat(price)
+                if demo.lenh_mo is not None:
+                    send_telegram(format_demo_status_msg(demo, price))
             print(f"[{now_str}] Da gui health check")
             last_health_time = now_vn()
 
