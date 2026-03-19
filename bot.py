@@ -40,6 +40,11 @@ RR               = float(os.environ.get("RR", "2.0"))
 # Phút hợp lệ để gửi noti (đuôi 0 hoặc 5)
 VALID_MINUTES = set(range(0, 60, 5))  # 0,5,10,15,...,55
 
+# Demo trading config
+DEMO_MARGIN    = float(os.environ.get("DEMO_MARGIN", "10"))    # $10 margin
+DEMO_LEVERAGE  = float(os.environ.get("DEMO_LEVERAGE", "200")) # x200
+DEMO_SIZE      = DEMO_MARGIN * DEMO_LEVERAGE                   # $2000 notional
+
 def now_vn():
     """Giờ Việt Nam GMT+7"""
     return datetime.utcnow() + timedelta(hours=7)
@@ -479,6 +484,165 @@ def format_nodata_msg():
     )
 
 # ==========================================
+# DEMO TRADING TRACKER
+# ==========================================
+class DemoTracker:
+    """
+    Theo dõi lệnh demo theo tín hiệu SMC
+    Margin: $10, Đòn bẩy: x200 → Notional: $2000
+    PnL tính theo: (Δgiá / entry) * notional
+    """
+    def __init__(self, margin=10, leverage=200):
+        self.margin    = margin
+        self.leverage  = leverage
+        self.notional  = margin * leverage
+        self.lenh_mo   = None   # lệnh đang mở
+        self.lich_su   = []     # lịch sử lệnh đã đóng
+
+    def mo_lenh(self, signal, price):
+        """Mở lệnh demo theo tín hiệu"""
+        if self.lenh_mo is not None:
+            return None  # đã có lệnh, bỏ qua
+
+        side   = signal['side']
+        entry  = round(price, 2)   # dùng giá thị trường hiện tại
+        sl     = round(signal['sl'], 2)
+        tp     = round(signal['tp'], 2)
+        risk_r = abs(entry - sl)
+        tp_r   = abs(tp - entry)
+
+        # PnL khi SL/TP tính bằng USD
+        pnl_sl = round(-abs(risk_r / entry * self.notional), 4)
+        pnl_tp = round( abs(tp_r  / entry * self.notional), 4)
+
+        self.lenh_mo = {
+            'side':      side,
+            'entry':     entry,
+            'sl':        sl,
+            'tp':        tp,
+            'open_time': now_vn().strftime('%d/%m %H:%M'),
+            'pnl_sl':    pnl_sl,
+            'pnl_tp':    pnl_tp,
+            'margin':    self.margin,
+            'leverage':  self.leverage,
+            'notional':  self.notional,
+            'status':    'OPEN',
+        }
+        return self.lenh_mo
+
+    def cap_nhat(self, price):
+        """Kiểm tra SL/TP và tính lãi lỗ hiện tại"""
+        if self.lenh_mo is None:
+            return None, None
+
+        l = self.lenh_mo
+        side = l['side']
+
+        # Tính PnL hiện tại
+        if side == 'LONG':
+            pnl_now = round((price - l['entry']) / l['entry'] * l['notional'], 4)
+            hit_sl  = price <= l['sl']
+            hit_tp  = price >= l['tp']
+        else:
+            pnl_now = round((l['entry'] - price) / l['entry'] * l['notional'], 4)
+            hit_sl  = price >= l['sl']
+            hit_tp  = price <= l['tp']
+
+        l['pnl_now']   = pnl_now
+        l['price_now'] = price
+
+        if hit_tp:
+            l['status']     = 'TP ✅'
+            l['close_time'] = now_vn().strftime('%d/%m %H:%M')
+            l['pnl_final']  = l['pnl_tp']
+            self.lich_su.append(dict(l))
+            closed = dict(l)
+            self.lenh_mo = None
+            return 'TP', closed
+
+        if hit_sl:
+            l['status']     = 'SL ❌'
+            l['close_time'] = now_vn().strftime('%d/%m %H:%M')
+            l['pnl_final']  = l['pnl_sl']
+            self.lich_su.append(dict(l))
+            closed = dict(l)
+            self.lenh_mo = None
+            return 'SL', closed
+
+        return 'OPEN', l
+
+    def tong_pnl(self):
+        return round(sum(t.get('pnl_final', 0) for t in self.lich_su), 4)
+
+
+def format_demo_open_msg(lenh):
+    side  = lenh['side']
+    emoji = "🟢" if side == 'LONG' else "🔴"
+    loai  = "MUA (LONG)" if side == 'LONG' else "BÁN (SHORT)"
+    return (
+        f"{emoji} <b>DEMO MỞ LỆNH - VÀNG</b>\n\n"
+        f"📌 Lệnh     : <b>{loai}</b>\n"
+        f"💰 Vốn      : <b>${lenh['margin']} × {int(lenh['leverage'])}x = ${lenh['notional']}</b>\n"
+        f"🎯 Vào lệnh : <b>{lenh['entry']}</b>\n"
+        f"🛑 Cắt lỗ   : <b>{lenh['sl']}</b>  (−${abs(lenh['pnl_sl'])})\n"
+        f"✅ Chốt lời : <b>{lenh['tp']}</b>  (+${lenh['pnl_tp']})\n"
+        f"⏰ Mở lúc   : <b>{lenh['open_time']} (GMT+7)</b>\n\n"
+        f"<i>⚠️ Lệnh demo mô phỏng, không phải lệnh thật</i>"
+    )
+
+def format_demo_close_msg(lenh, ket_qua):
+    side    = lenh['side']
+    pnl     = lenh.get('pnl_final', 0)
+    loai    = "MUA" if side == 'LONG' else "BÁN"
+    if ket_qua == 'TP':
+        emoji  = "🎉"
+        title  = "CHỐT LỜI (TP)"
+        pnl_str = f"+${pnl}"
+    else:
+        emoji  = "💥"
+        title  = "CẮT LỖ (SL)"
+        pnl_str = f"-${abs(pnl)}"
+
+    return (
+        f"{emoji} <b>DEMO {title}</b>\n\n"
+        f"📌 Lệnh     : <b>{loai}</b>\n"
+        f"🎯 Vào lệnh : <b>{lenh['entry']}</b>\n"
+        f"📤 Đóng lệnh: <b>{lenh['price_now']}</b>\n"
+        f"💵 Lãi/Lỗ   : <b>{pnl_str}</b>\n"
+        f"⏰ Đóng lúc : <b>{lenh.get('close_time','--')} (GMT+7)</b>\n"
+    )
+
+def format_demo_status_msg(demo, price):
+    l = demo.lenh_mo
+    tong = demo.tong_pnl()
+    tong_str = f"+${tong}" if tong >= 0 else f"-${abs(tong)}"
+    tong_icon = "🟢" if tong > 0 else ("🔴" if tong < 0 else "⚪")
+
+    lines = [f"📊 <b>DEMO Trading - Trạng thái</b>\n"]
+
+    if l:
+        side    = l['side']
+        pnl_now = l.get('pnl_now', 0)
+        loai    = "MUA" if side == 'LONG' else "BÁN"
+        pnl_icon = "📈" if pnl_now >= 0 else "📉"
+        pnl_str  = f"+${pnl_now}" if pnl_now >= 0 else f"-${abs(pnl_now)}"
+        lines.append(
+            f"🔓 Lệnh đang mở: <b>{loai}</b>\n"
+            f"   Vào lệnh  : <b>{l['entry']}</b>\n"
+            f"   Giá hiện tại: <b>{price}</b>\n"
+            f"   {pnl_icon} Lãi/Lỗ tạm: <b>{pnl_str}</b>\n"
+            f"   SL: <b>{l['sl']}</b>  |  TP: <b>{l['tp']}</b>\n"
+            f"   Mở lúc: <b>{l['open_time']}</b>"
+        )
+    else:
+        lines.append("💤 Không có lệnh đang mở")
+
+    lines.append(f"\n{tong_icon} Tổng lãi/lỗ hôm nay: <b>{tong_str}</b>")
+    lines.append(f"📋 Số lệnh đã đóng: <b>{len(demo.lich_su)}</b>")
+    return "\n".join(lines)
+
+
+# ==========================================
 # MAIN LOOP
 # ==========================================
 print(f"Bot SMC khoi dong | {INTERVAL} | Chi ban phut :00,:05,:10,...")
@@ -488,23 +652,24 @@ last_signal_key      = None
 last_status_time     = now_vn() - timedelta(minutes=10)
 STATUS_INTERVAL      = 10 * 60
 last_checked_min     = -1
-last_backtest_date   = None   # ngày đã gửi báo cáo backtest
-BACKTEST_HOUR        = 20     # gửi lúc 20:00 GMT+7 mỗi ngày
+last_backtest_date   = None
+BACKTEST_HOUR        = 20
+
+# Khởi tạo Demo Tracker
+demo = DemoTracker(margin=10, leverage=200)
 
 while True:
     try:
         vn_now  = now_vn()
         now_str = vn_now.strftime('%H:%M:%S')
-
         cur_min = vn_now.minute
 
-        # ⏰ BỘ LỌC THỜI GIAN: chỉ chạy khi phút có đuôi 0 hoặc 5
+        # ⏰ BỘ LỌC THỜI GIAN
         if not is_valid_minute():
             print(f"[{now_str}] Bo qua (phut :{cur_min:02d})")
             time.sleep(20)
             continue
 
-        # Tránh chạy lặp 2 lần trong cùng 1 phút
         if cur_min == last_checked_min:
             time.sleep(20)
             continue
@@ -525,23 +690,45 @@ while True:
         price  = round(df['close'].iloc[-1], 2)
         signal = scan_signal(df)
 
-        # --- GỬI TÍN HIỆU MỚI ---
+        # --- DEMO: Cập nhật lệnh đang mở ---
+        if demo.lenh_mo is not None:
+            trang_thai, lenh_data = demo.cap_nhat(price)
+            if trang_thai == 'TP':
+                send_telegram(format_demo_close_msg(lenh_data, 'TP'))
+                print(f"[{now_str}] DEMO TP | +${lenh_data['pnl_final']}")
+            elif trang_thai == 'SL':
+                send_telegram(format_demo_close_msg(lenh_data, 'SL'))
+                print(f"[{now_str}] DEMO SL | -${abs(lenh_data['pnl_sl'])}")
+
+        # --- GỬI TÍN HIỆU MỚI + MỞ LỆNH DEMO ---
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
+                # Gửi tín hiệu
                 send_telegram(format_signal_msg(signal, price, INTERVAL))
-                print(f"[{now_str}] TIN HIEU {signal['side']} | Entry:{round(signal['entry'],2)} SL:{round(signal['sl'],2)} TP:{round(signal['tp'],2)}")
+                print(f"[{now_str}] TIN HIEU {signal['side']} | Entry:{round(signal['entry'],2)}")
                 last_signal_key = sig_key
+
+                # Mở lệnh demo nếu chưa có lệnh
+                lenh_demo = demo.mo_lenh(signal, price)
+                if lenh_demo:
+                    send_telegram(format_demo_open_msg(lenh_demo))
+                    print(f"[{now_str}] DEMO MO LENH {lenh_demo['side']} @ {lenh_demo['entry']}")
             else:
                 print(f"[{now_str}] Gia:{price} | Tin hieu cu ({signal['side']}) - bo qua")
         else:
             print(f"[{now_str}] Gia:{price} | Chua co tin hieu")
 
-        # --- GỬI TRẠNG THÁI MỖI 10 PHÚT ---
+        # --- GỬI TRẠNG THÁI MỖI 10 PHÚT (gộp cả demo) ---
         elapsed = (now_vn() - last_status_time).total_seconds()
         if elapsed >= STATUS_INTERVAL:
             next_str = (now_vn() + timedelta(minutes=10)).strftime('%H:%M')
+            # Gửi status bot
             send_telegram(format_status_msg(price, INTERVAL, signal, next_str))
+            # Gửi status demo nếu có lệnh đang mở hoặc có lịch sử
+            if demo.lenh_mo is not None or demo.lich_su:
+                demo.cap_nhat(price)  # cập nhật PnL mới nhất
+                send_telegram(format_demo_status_msg(demo, price))
             print(f"[{now_str}] Da gui status Telegram")
             last_status_time = now_vn()
 
@@ -555,7 +742,10 @@ while True:
             last_backtest_date = today
             print(f"[{now_str}] Da gui backtest {today}: {len(bt_trades)} lenh")
 
-        # Ngủ 30s rồi check lại (đảm bảo không bỏ sót phút :x5/:x0)
+            # Reset demo tracker sang ngày mới
+            demo = DemoTracker(margin=10, leverage=200)
+            print(f"[{now_str}] Da reset Demo Tracker cho ngay moi")
+
         time.sleep(30)
 
     except KeyboardInterrupt:
