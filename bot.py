@@ -15,25 +15,38 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"OK - SMC Bot running")
-    def log_message(self, format, *args): pass  # Tắt log HTTP
+        self.wfile.write(b"OK - SMC Bot dang chay")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, format, *args): pass
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
-# Chạy HTTP server trên thread riêng
 threading.Thread(target=run_server, daemon=True).start()
 
 # ==========================================
-# CONFIG - ĐỌC TỪ ENVIRONMENT VARIABLES
+# CONFIG
 # ==========================================
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 INTERVAL         = os.environ.get("INTERVAL", "15m")
-CHECK_SECS       = int(os.environ.get("CHECK_SECS", "450"))
+CHECK_SECS       = int(os.environ.get("CHECK_SECS", "60"))  # check mỗi 60s, lọc phút sau
 RR               = float(os.environ.get("RR", "2.0"))
+
+# Phút hợp lệ để gửi noti (đuôi 0 hoặc 5)
+VALID_MINUTES = set(range(0, 60, 5))  # 0,5,10,15,...,55
+
+def now_vn():
+    """Giờ Việt Nam GMT+7"""
+    return datetime.utcnow() + timedelta(hours=7)
+
+def is_valid_minute():
+    """Chỉ chạy khi phút hiện tại có đuôi 0 hoặc 5"""
+    return now_vn().minute in VALID_MINUTES
 
 # ==========================================
 # TELEGRAM
@@ -56,14 +69,11 @@ def send_telegram(msg):
 # DATA FETCH
 # ==========================================
 def fetch_data(interval="15m", candles=500):
-    """Dùng Yahoo Finance - không bị block"""
-    # Map interval sang Yahoo format
     yf_map = {
         "1m":"1m","3m":"2m","5m":"5m","15m":"15m",
         "30m":"30m","1h":"60m","4h":"60m"
     }
     yf_interval = yf_map.get(interval, "15m")
-    # Tính period cần thiết
     period_map = {
         "1m":"7d","2m":"60d","5m":"60d","15m":"60d",
         "30m":"60d","60m":"730d"
@@ -71,11 +81,7 @@ def fetch_data(interval="15m", candles=500):
     period = period_map.get(yf_interval, "60d")
 
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {
-        "interval": yf_interval,
-        "range":    period,
-        "events":   "history"
-    }
+    params = {"interval": yf_interval, "range": period, "events": "history"}
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json"
@@ -84,23 +90,22 @@ def fetch_data(interval="15m", candles=500):
         r   = requests.get(url, params=params, headers=headers, timeout=15)
         raw = r.json()
         result = raw.get("chart", {}).get("result", [])
-        if not result: 
-            print(f"Yahoo tra ve rong")
+        if not result:
+            print("Yahoo tra ve rong")
             return None
-        ts     = result[0]["timestamp"]
-        ohlcv  = result[0]["indicators"]["quote"][0]
+        ts    = result[0]["timestamp"]
+        ohlcv = result[0]["indicators"]["quote"][0]
         df = pd.DataFrame({
             "datetime": pd.to_datetime(ts, unit="s") + pd.Timedelta(hours=7),
-            "open":     ohlcv["open"],
-            "high":     ohlcv["high"],
-            "low":      ohlcv["low"],
-            "close":    ohlcv["close"],
-            "volume":   ohlcv["volume"]
+            "open":  ohlcv["open"],
+            "high":  ohlcv["high"],
+            "low":   ohlcv["low"],
+            "close": ohlcv["close"],
+            "volume":ohlcv["volume"]
         })
         df = df.dropna().reset_index(drop=True)
-        # Lấy N nến cuối
         df = df.tail(candles).reset_index(drop=True)
-        print(f"Data OK: {len(df)} nen | GC=F (Yahoo)")
+        print(f"Data OK: {len(df)} nen | GC=F")
         return df
     except Exception as e:
         print(f"Yahoo loi: {e}")
@@ -161,14 +166,14 @@ def find_ob(df, sig, i, lookback=20):
     if sig == "BULL":
         for j in range(i-1, start-1, -1):
             o,c_,h_,l_ = df['open'].iloc[j],df['close'].iloc[j],df['high'].iloc[j],df['low'].iloc[j]
-            body = abs(c_-o); rng = h_-l_
+            body=abs(c_-o); rng=h_-l_
             if c_<o and rng>0 and body/rng>0.35 and body>atr*0.25:
                 if not any(df['close'].iloc[k]<l_ for k in range(j+1,i)):
                     return {'type':'BULL_OB','hi':h_,'lo':l_,'mid':(h_+l_)/2}
     elif sig == "BEAR":
         for j in range(i-1, start-1, -1):
             o,c_,h_,l_ = df['open'].iloc[j],df['close'].iloc[j],df['high'].iloc[j],df['low'].iloc[j]
-            body = abs(c_-o); rng = h_-l_
+            body=abs(c_-o); rng=h_-l_
             if c_>o and rng>0 and body/rng>0.35 and body>atr*0.25:
                 if not any(df['close'].iloc[k]>h_ for k in range(j+1,i)):
                     return {'type':'BEAR_OB','hi':h_,'lo':l_,'mid':(h_+l_)/2}
@@ -233,73 +238,121 @@ def scan_signal(df):
     return None
 
 # ==========================================
-# FORMAT TIN TELEGRAM
+# FORMAT TIN NHẮN TIẾNG VIỆT
 # ==========================================
-def format_msg(signal, price, tf):
+def format_signal_msg(signal, price, tf):
     side   = signal['side']
-    emoji  = "🟢" if side=="LONG" else "🔴"
-    action = "MUA (LONG)" if side=="LONG" else "BAN (SHORT)"
+    emoji  = "🟢" if side == "LONG" else "🔴"
+    lenh   = "MUA (LONG)" if side == "LONG" else "BÁN (SHORT)"
     entry  = round(signal['entry'], 2)
     sl     = round(signal['sl'], 2)
     tp     = round(signal['tp'], 2)
-    rr_r   = round(abs(tp-entry)/max(abs(entry-sl),0.01), 2)
-    now    = datetime.now().strftime('%d/%m/%Y %H:%M')
+    rr_r   = round(abs(tp - entry) / max(abs(entry - sl), 0.01), 2)
+    gio    = now_vn().strftime('%d/%m/%Y %H:%M')
     return (
-        f"{emoji} <b>TIN HIEU SMC - XAUUSDT {tf}</b>\n\n"
-        f"Lenh      : <b>{action}</b>\n"
-        f"Gia HT    : <b>{price}</b>\n"
-        f"Entry     : <b>{entry}</b>\n"
-        f"Stop Loss : <b>{sl}</b>\n"
-        f"Take Profit: <b>{tp}</b>\n"
-        f"R:R       : <b>1:{rr_r}</b>\n\n"
-        f"<i>{now} (GMT+7)</i>\n"
-        f"<i>Chi tham khao, tu xac nhan truoc khi vao lenh</i>"
+        f"{emoji} <b>TÍN HIỆU SMC - VÀNG {tf}</b>\n\n"
+        f"📌 Lệnh      : <b>{lenh}</b>\n"
+        f"💰 Giá hiện tại : <b>{price}</b>\n"
+        f"🎯 Vào lệnh  : <b>{entry}</b>\n"
+        f"🛑 Cắt lỗ    : <b>{sl}</b>\n"
+        f"✅ Chốt lời  : <b>{tp}</b>\n"
+        f"📊 R:R       : <b>1:{rr_r}</b>\n\n"
+        f"<i>⏰ {gio} (GMT+7)</i>\n"
+        f"<i>⚠️ Chỉ tham khảo, tự xác nhận trước khi vào lệnh</i>"
+    )
+
+def format_status_msg(price, tf, signal, next_time_str):
+    gio = now_vn().strftime('%H:%M')
+    if signal:
+        side  = signal['side']
+        lenh  = "MUA (LONG)" if side == "LONG" else "BÁN (SHORT)"
+        emoji = "🟢" if side == "LONG" else "🔴"
+        sig_info = (
+            f"{emoji} Có tín hiệu: <b>{lenh}</b>\n"
+            f"   Vào lệnh : <b>{round(signal['entry'],2)}</b>\n"
+            f"   Cắt lỗ   : <b>{round(signal['sl'],2)}</b>\n"
+            f"   Chốt lời : <b>{round(signal['tp'],2)}</b>\n"
+            f"   (Đang chờ retest vùng OB)"
+        )
+    else:
+        sig_info = "⏳ Chưa có tín hiệu. Đang theo dõi..."
+
+    return (
+        f"🤖 <b>SMC Bot - Cập nhật {gio} (GMT+7)</b>\n\n"
+        f"Giá VÀNG   : <b>{price}</b>\n"
+        f"Khung TG   : <b>{tf}</b>\n"
+        f"Trạng thái : ✅ Đang chạy\n\n"
+        f"{sig_info}\n\n"
+        f"<i>Cập nhật tiếp theo lúc {next_time_str}</i>"
+    )
+
+def format_startup_msg(tf, check_min):
+    gio = now_vn().strftime('%d/%m/%Y %H:%M')
+    return (
+        f"🚀 <b>Bot SMC VÀNG {tf} đã khởi động</b>\n\n"
+        f"✅ Đang chạy bình thường\n"
+        f"🔄 Cập nhật mỗi {check_min} phút (các phút :00, :05, :10...)\n"
+        f"⏰ {gio} (GMT+7)"
+    )
+
+def format_error_msg(err):
+    gio = now_vn().strftime('%d/%m/%Y %H:%M')
+    return (
+        f"❌ <b>SMC Bot - Lỗi</b>\n\n"
+        f"Chi tiết: {str(err)[:200]}\n"
+        f"<i>⏰ {gio} (GMT+7)</i>"
+    )
+
+def format_nodata_msg():
+    gio = now_vn().strftime('%d/%m/%Y %H:%M')
+    return (
+        f"⚠️ <b>SMC Bot - Cảnh báo</b>\n\n"
+        f"Không tải được dữ liệu VÀNG\n"
+        f"Đang thử lại...\n\n"
+        f"<i>⏰ {gio} (GMT+7)</i>"
     )
 
 # ==========================================
 # MAIN LOOP
 # ==========================================
-print(f"Bot SMC khoi dong | {INTERVAL} | Check moi {CHECK_SECS}s")
-send_telegram(
-    f"<b>Bot SMC XAUUSDT {INTERVAL} da khoi dong</b>\n"
-    f"Check moi {CHECK_SECS//60} phut\n"
-    f"{datetime.now().strftime('%d/%m/%Y %H:%M')} (GMT+7)"
-)
+print(f"Bot SMC khoi dong | {INTERVAL} | Chi ban phut :00,:05,:10,...")
+send_telegram(format_startup_msg(INTERVAL, 5))
 
 last_signal_key  = None
-last_status_time = datetime.now() - timedelta(minutes=10)  # Gửi ngay lần đầu
-STATUS_INTERVAL  = 10 * 60  # 10 phút
+last_status_time = now_vn() - timedelta(minutes=10)
+STATUS_INTERVAL  = 10 * 60  # gửi status mỗi 10 phút
 
 while True:
     try:
-        now_str = datetime.now().strftime('%H:%M:%S')
+        vn_now  = now_vn()
+        now_str = vn_now.strftime('%H:%M:%S')
+
+        # ⏰ BỘ LỌC THỜI GIAN: chỉ chạy khi phút có đuôi 0 hoặc 5
+        if not is_valid_minute():
+            print(f"[{now_str}] Bo qua (phut :{vn_now.minute:02d})")
+            time.sleep(30)  # ngủ 30s rồi kiểm tra lại
+            continue
+
         df = fetch_data(INTERVAL, candles=500)
 
         if df is None:
             print(f"[{now_str}] Khong tai duoc data")
-            # Vẫn gửi status nếu đến giờ
-            elapsed = (datetime.now() - last_status_time).total_seconds()
+            elapsed = (now_vn() - last_status_time).total_seconds()
             if elapsed >= STATUS_INTERVAL:
-                send_telegram(
-                    f"⚠️ <b>SMC Bot - Canh bao</b>\n\n"
-                    f"Khong tai duoc du lieu XAUUSDT\n"
-                    f"Dang thu lai...\n\n"
-                    f"<i>{datetime.now().strftime('%d/%m/%Y %H:%M')} (GMT+7)</i>"
-                )
-                last_status_time = datetime.now()
+                send_telegram(format_nodata_msg())
+                last_status_time = now_vn()
             time.sleep(60)
             continue
 
-        df    = add_indicators(df)
-        price = round(df['close'].iloc[-1], 2)
+        df     = add_indicators(df)
+        price  = round(df['close'].iloc[-1], 2)
         signal = scan_signal(df)
 
         # --- GỬI TÍN HIỆU MỚI ---
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
-                msg = format_msg(signal, price, INTERVAL)
-                send_telegram(msg)
+                send_telegram(format_signal_msg(signal, price, INTERVAL))
                 print(f"[{now_str}] TIN HIEU {signal['side']} | Entry:{round(signal['entry'],2)} SL:{round(signal['sl'],2)} TP:{round(signal['tp'],2)}")
                 last_signal_key = sig_key
             else:
@@ -308,46 +361,29 @@ while True:
             print(f"[{now_str}] Gia:{price} | Chua co tin hieu")
 
         # --- GỬI TRẠNG THÁI MỖI 10 PHÚT ---
-        elapsed = (datetime.now() - last_status_time).total_seconds()
+        elapsed = (now_vn() - last_status_time).total_seconds()
         if elapsed >= STATUS_INTERVAL:
-            if signal:
-                sig_side  = "LONG (MUA)" if signal['side']=="LONG" else "SHORT (BAN)"
-                sig_emoji = "🟢" if signal['side']=="LONG" else "🔴"
-                sig_info  = (
-                    f"{sig_emoji} Co tin hieu: <b>{sig_side}</b>\n"
-                    f"   Entry : <b>{round(signal['entry'],2)}</b>\n"
-                    f"   SL    : <b>{round(signal['sl'],2)}</b>\n"
-                    f"   TP    : <b>{round(signal['tp'],2)}</b>\n"
-                    f"   (Chua vao lenh - dang cho retest)"
-                )
-            else:
-                sig_info = "⏳ Chua co tin hieu. Dang theo doi..."
+            next_time = now_vn() + timedelta(minutes=10)
+            # Làm tròn đến phút :x0 hoặc :x5 tiếp theo
+            next_min = next_time.minute
+            next_valid = next_min + (5 - next_min % 5) if next_min % 5 != 0 else next_min
+            next_time  = next_time.replace(minute=next_valid % 60, second=0)
+            next_str   = next_time.strftime('%H:%M')
 
-            status_msg = (
-                f"🤖 <b>SMC Bot - Cap nhat {datetime.now().strftime('%H:%M')} (GMT+7)</b>\n\n"
-                f"Gia XAUUSDT : <b>{price}</b>\n"
-                f"Khung TG    : <b>{INTERVAL}</b>\n"
-                f"Trang thai  : ✅ Dang chay\n\n"
-                f"{sig_info}\n\n"
-                f"<i>Cap nhat tiep theo luc {(datetime.now() + timedelta(minutes=10)).strftime('%H:%M')}</i>"
-            )
-            send_telegram(status_msg)
+            send_telegram(format_status_msg(price, INTERVAL, signal, next_str))
             print(f"[{now_str}] Da gui status Telegram")
-            last_status_time = datetime.now()
+            last_status_time = now_vn()
 
-        time.sleep(CHECK_SECS)
+        # Ngủ đến hết phút hiện tại + buffer 5s
+        sleep_secs = 60 - now_vn().second + 5
+        time.sleep(sleep_secs)
 
     except KeyboardInterrupt:
         print("\nBot dung.")
         break
     except Exception as e:
-        print(f"[{now_str}] Loi: {e}")
-        # Gửi cảnh báo lỗi về Telegram
+        print(f"[{now_vn().strftime('%H:%M:%S')}] Loi: {e}")
         try:
-            send_telegram(
-                f"❌ <b>SMC Bot - Loi</b>\n\n"
-                f"Chi tiet: {str(e)[:200]}\n"
-                f"<i>{datetime.now().strftime('%d/%m/%Y %H:%M')} (GMT+7)</i>"
-            )
+            send_telegram(format_error_msg(e))
         except: pass
         time.sleep(60)
