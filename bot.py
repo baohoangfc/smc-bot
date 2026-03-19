@@ -221,7 +221,7 @@ def sltp_short(df, i, ob):
 def scan_signal(df):
     sh = swing_highs(df, n=3)
     sl = swing_lows(df,  n=3)
-    for i in range(len(df)-1, max(len(df)-80, 10), -1):
+    for i in range(len(df)-1, max(len(df)-150, 10), -1):
         sig = detect_structure(df, sh, sl, i)
         if not sig: continue
         ob = find_ob(df, sig, i, lookback=20)
@@ -654,13 +654,16 @@ def format_demo_status_msg(demo, price):
 print(f"Bot SMC khoi dong | {INTERVAL}")
 send_telegram(format_startup_msg(INTERVAL, 15))
 
-last_signal_key     = None
-last_health_time    = now_vn()                        # không gửi ngay, chờ 15 phút
-last_demo_status_t  = now_vn() - timedelta(minutes=1)
-last_backtest_date  = None
-HEALTH_INTERVAL     = 15 * 60   # [2] health mỗi 15 phút
-DEMO_STATUS_INTERVAL = 1 * 60   # [4] demo status mỗi 1 phút
-BACKTEST_HOUR       = 20
+last_signal_key      = None
+last_health_time     = now_vn()
+last_demo_status_t   = now_vn() - timedelta(minutes=1)
+last_backtest_date   = None
+last_fetch_time      = now_vn() - timedelta(minutes=5)
+cached_df            = None
+FETCH_INTERVAL       = 30    # fetch API mỗi 30s
+HEALTH_INTERVAL      = 15 * 60
+DEMO_STATUS_INTERVAL = 1 * 60
+BACKTEST_HOUR        = 20
 
 # Khởi tạo Demo Tracker
 demo = DemoTracker(margin=10, leverage=200)
@@ -670,18 +673,24 @@ while True:
         vn_now  = now_vn()
         now_str = vn_now.strftime('%H:%M:%S')
 
-        df = fetch_data(INTERVAL, candles=500)
+        # Fetch data mỗi 30s, dùng cache cho các vòng giữa
+        elapsed_fetch = (now_vn() - last_fetch_time).total_seconds()
+        if elapsed_fetch >= FETCH_INTERVAL or cached_df is None:
+            df = fetch_data(INTERVAL, candles=500)
+            if df is not None:
+                cached_df = add_indicators(df)
+                last_fetch_time = now_vn()
+        df = cached_df
 
         if df is None:
-            print(f"[{now_str}] Khong tai duoc data")
+            print(f"[{now_str}] Khong co data")
             elapsed_health = (now_vn() - last_health_time).total_seconds()
             if elapsed_health >= HEALTH_INTERVAL:
                 send_telegram(format_nodata_msg())
                 last_health_time = now_vn()
-            time.sleep(30)
+            time.sleep(10)
             continue
 
-        df    = add_indicators(df)
         price = round(df['close'].iloc[-1], 2)
 
         # ==========================================
@@ -766,7 +775,7 @@ while True:
             demo = DemoTracker(margin=10, leverage=200)
             print(f"[{now_str}] Da reset Demo Tracker cho ngay moi")
 
-        time.sleep(30)  # vòng lặp 30s
+        time.sleep(10)  # vòng lặp 10s → tín hiệu bắn nhanh hơn
 
     except KeyboardInterrupt:
         print("\nBot dung.")
