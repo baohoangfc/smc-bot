@@ -117,12 +117,12 @@ def fetch_data(interval="15m", candles=500):
         print(f"Yahoo loi: {e}")
         return None
 
-def fetch_xauusd_price():
-    """Lấy giá XAUUSD spot từ Yahoo"""
+def fetch_latest_price():
+    """Lấy giá GC=F mới nhất - nhẹ, nhanh"""
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
         r   = requests.get(url, params={"interval":"1m","range":"1d"},
-                           headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+                           headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
         raw    = r.json()
         result = raw.get("chart",{}).get("result",[])
         if not result: return None
@@ -131,6 +131,12 @@ def fetch_xauusd_price():
         return round(closes[-1], 2) if closes else None
     except:
         return None
+
+def fetch_xauusd_price():
+    """Ước tính XAUUSD spot = GC=F + 30"""
+    p = fetch_latest_price()
+    return round(p + 30, 2) if p else None
+
 
 # ==========================================
 # INDICATORS
@@ -719,12 +725,15 @@ while True:
 
         price = round(df['close'].iloc[-1], 2)
 
+        # Lấy giá mới nhất realtime cho tất cả noti
+        fresh_price = fetch_latest_price() or price
+
         # ==========================================
         # [3] DEMO - Kiểm tra SL/TP → bắn NGAY
         # ==========================================
         sltp_hit = False
         if demo.lenh_mo is not None:
-            trang_thai, lenh_data = demo.cap_nhat(price)
+            trang_thai, lenh_data = demo.cap_nhat(fresh_price)
             if trang_thai == 'TP' and lenh_data:
                 send_telegram(format_demo_close_msg(lenh_data, 'TP'))
                 print(f"[{now_str}] DEMO TP | +${lenh_data.get('pnl_final',0)}")
@@ -741,33 +750,32 @@ while True:
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
-                send_telegram(format_signal_msg(signal, price, INTERVAL))
+                send_telegram(format_signal_msg(signal, fresh_price, INTERVAL))
                 print(f"[{now_str}] TIN HIEU {signal['side']} @ {round(signal['entry'],2)}")
                 last_signal_key = sig_key
 
-                lenh_demo = demo.mo_lenh(signal, price)
+                lenh_demo = demo.mo_lenh(signal, fresh_price)
                 if lenh_demo:
                     send_telegram(format_demo_open_msg(lenh_demo))
                     print(f"[{now_str}] DEMO MO LENH {lenh_demo['side']} @ {lenh_demo['entry']}")
             else:
-                print(f"[{now_str}] Gia:{price} | Tin hieu cu ({signal['side']}) - bo qua")
+                print(f"[{now_str}] Gia:{fresh_price} | Tin hieu cu ({signal['side']}) - bo qua")
         else:
-            # Hết tín hiệu → xóa key để sẵn sàng bắn tín hiệu mới
             if last_signal_key is not None:
                 print(f"[{now_str}] Het tin hieu, reset signal key")
                 last_signal_key = None
-            print(f"[{now_str}] Gia:{price} | Chua co tin hieu")
+            print(f"[{now_str}] Gia:{fresh_price} | Chua co tin hieu")
 
         # ==========================================
         # [4] TRẠNG THÁI LỆNH DEMO → mỗi 1 phút nếu đang mở
         # ==========================================
         elapsed_demo = (now_vn() - last_demo_status_t).total_seconds()
         if demo.lenh_mo is not None and elapsed_demo >= DEMO_STATUS_INTERVAL and not sltp_hit:
-            ts, ld = demo.cap_nhat(price)
+            fp2 = fetch_latest_price() or fresh_price
+            ts, ld = demo.cap_nhat(fp2)
             if ts == 'OPEN' and demo.lenh_mo is not None:
-                pnl_now = demo.lenh_mo.get('pnl_now', 0)
-                send_telegram(format_demo_status_msg(demo, price))
-                print(f"[{now_str}] Da gui demo status | PnL tam: ${pnl_now}")
+                send_telegram(format_demo_status_msg(demo, fp2))
+                print(f"[{now_str}] Demo status | Gia: {fp2} PnL: ${demo.lenh_mo.get('pnl_now',0)}")
             last_demo_status_t = now_vn()
 
         # ==========================================
@@ -775,13 +783,14 @@ while True:
         # ==========================================
         elapsed_health = (now_vn() - last_health_time).total_seconds()
         if elapsed_health >= HEALTH_INTERVAL:
-            next_str   = (now_vn() + timedelta(minutes=15)).strftime('%H:%M')
-            xau_price  = fetch_xauusd_price()
-            send_telegram(format_status_msg(price, xau_price, INTERVAL, signal, next_str))
+            next_str  = (now_vn() + timedelta(minutes=15)).strftime('%H:%M')
+            fp3       = fetch_latest_price() or fresh_price
+            xau_price = round(fp3 + 30, 2)
+            send_telegram(format_status_msg(fp3, xau_price, INTERVAL, signal, next_str))
             if demo.lenh_mo is not None:
-                demo.cap_nhat(price)
+                demo.cap_nhat(fp3)
                 if demo.lenh_mo is not None:
-                    send_telegram(format_demo_status_msg(demo, price))
+                    send_telegram(format_demo_status_msg(demo, fp3))
             print(f"[{now_str}] Da gui health check | GC=F:{price} XAUUSD:{xau_price}")
             last_health_time = now_vn()
 
