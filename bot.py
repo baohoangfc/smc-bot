@@ -117,20 +117,7 @@ def fetch_data(interval="15m", candles=500):
         print(f"Yahoo loi: {e}")
         return None
 
-def fetch_latest_price():
-    """Lấy giá GC=F mới nhất - nhẹ, nhanh"""
-    try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-        r   = requests.get(url, params={"interval":"1m","range":"1d"},
-                           headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
-        raw    = r.json()
-        result = raw.get("chart",{}).get("result",[])
-        if not result: return None
-        closes = result[0]["indicators"]["quote"][0]["close"]
-        closes = [x for x in closes if x is not None]
-        return round(closes[-1], 2) if closes else None
-    except:
-        return None
+def fetch_xauusd_price():
     """Lấy giá XAUUSD spot từ Yahoo"""
     try:
         url = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
@@ -776,11 +763,11 @@ while True:
         # ==========================================
         elapsed_demo = (now_vn() - last_demo_status_t).total_seconds()
         if demo.lenh_mo is not None and elapsed_demo >= DEMO_STATUS_INTERVAL and not sltp_hit:
-            fresh_price = fetch_latest_price() or price
-            ts, ld = demo.cap_nhat(fresh_price)
+            ts, ld = demo.cap_nhat(price)
             if ts == 'OPEN' and demo.lenh_mo is not None:
-                send_telegram(format_demo_status_msg(demo, fresh_price))
-                print(f"[{now_str}] Da gui demo status | Gia: {fresh_price} PnL: ${demo.lenh_mo.get('pnl_now',0)}")
+                pnl_now = demo.lenh_mo.get('pnl_now', 0)
+                send_telegram(format_demo_status_msg(demo, price))
+                print(f"[{now_str}] Da gui demo status | PnL tam: ${pnl_now}")
             last_demo_status_t = now_vn()
 
         # ==========================================
