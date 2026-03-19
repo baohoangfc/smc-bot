@@ -535,56 +535,82 @@ class DemoTracker:
         self.leverage  = leverage
         self.notional  = margin * leverage
         self.lenh_mo   = None   # lệnh đang mở
+        self.lenh_cho  = None   # lệnh đang chờ entry
         self.lich_su   = []     # lịch sử lệnh đã đóng
 
     def mo_lenh(self, signal, price):
-        """Mở lệnh demo tại giá thị trường hiện tại (market order)"""
-        if self.lenh_mo is not None:
+        """Đặt lệnh demo chờ - chỉ mở khi giá chạm đúng entry từ tín hiệu SMC"""
+        if self.lenh_mo is not None or self.lenh_cho is not None:
             return None
 
         side  = signal['side']
-        entry = round(price, 2)       # vào ngay tại giá thị trường
+        entry = round(signal['entry'], 2)  # đúng entry từ tín hiệu
         sl    = round(signal['sl'], 2)
         tp    = round(signal['tp'], 2)
-
-        # Điều chỉnh SL/TP theo tỉ lệ từ entry thực tế
-        risk  = abs(signal['entry'] - signal['sl'])
-        if side == 'LONG':
-            sl = round(entry - risk, 2)
-            tp = round(entry + risk * RR, 2)
-        else:
-            sl = round(entry + risk, 2)
-            tp = round(entry - risk * RR, 2)
 
         risk_r = abs(entry - sl)
         tp_r   = abs(tp - entry)
         pnl_sl = round(-abs(risk_r / entry * self.notional), 4)
         pnl_tp = round( abs(tp_r  / entry * self.notional), 4)
 
-        self.lenh_mo = {
+        self.lenh_cho = {
             'side':      side,
             'entry':     entry,
             'sl':        sl,
             'tp':        tp,
-            'open_time': now_vn().strftime('%d/%m %H:%M'),
             'pnl_sl':    pnl_sl,
             'pnl_tp':    pnl_tp,
             'margin':    self.margin,
             'leverage':  self.leverage,
             'notional':  self.notional,
-            'status':    'OPEN',
+            'signal_time': now_vn().strftime('%d/%m %H:%M'),
+            'ttl':       0,  # đếm số lần check, hủy sau 60 lần (~10 phút)
         }
-        return self.lenh_mo
+        return self.lenh_cho
+
+    def kiem_tra_cho(self, price):
+        """Kiểm tra xem giá có chạm entry chưa → mở lệnh thật"""
+        if self.lenh_cho is None:
+            return None
+
+        l    = self.lenh_cho
+        side = l['side']
+        l['ttl'] += 1
+
+        # Hủy lệnh chờ sau 60 lần check (~10 phút)
+        if l['ttl'] > 60:
+            self.lenh_cho = None
+            return 'EXPIRED'
+
+        hit_entry = (side == 'LONG'  and price <= l['entry']) or \
+                    (side == 'SHORT' and price >= l['entry'])
+
+        if hit_entry:
+            self.lenh_mo = {
+                'side':      side,
+                'entry':     l['entry'],
+                'sl':        l['sl'],
+                'tp':        l['tp'],
+                'pnl_sl':    l['pnl_sl'],
+                'pnl_tp':    l['pnl_tp'],
+                'margin':    l['margin'],
+                'leverage':  l['leverage'],
+                'notional':  l['notional'],
+                'open_time': now_vn().strftime('%d/%m %H:%M'),
+                'status':    'OPEN',
+            }
+            self.lenh_cho = None
+            return 'FILLED'
+        return 'WAITING'
 
     def cap_nhat(self, price):
         """Kiểm tra SL/TP và tính lãi lỗ hiện tại"""
         if self.lenh_mo is None:
             return None, None
 
-        l = self.lenh_mo
+        l    = self.lenh_mo
         side = l['side']
 
-        # Tính PnL hiện tại
         if side == 'LONG':
             pnl_now = round((price - l['entry']) / l['entry'] * l['notional'], 4)
             hit_sl  = price <= l['sl']
@@ -768,13 +794,42 @@ while True:
                 print(f"[{now_str}] TIN HIEU {signal['side']} @ {round(signal['entry'],2)}")
                 last_signal_key = sig_key
 
-                lenh_demo = demo.mo_lenh(signal, fresh_price)
-                if lenh_demo:
-                    send_telegram(format_demo_open_msg(lenh_demo))
-                    print(f"[{now_str}] DEMO MO LENH {lenh_demo['side']} @ {lenh_demo['entry']}")
+                # Đặt lệnh chờ - chờ giá retest về entry OB
+                lenh_cho = demo.mo_lenh(signal, fresh_price)
+                if lenh_cho:
+                    gio = now_vn().strftime('%d/%m %H:%M')
+                    side_txt = "BÁN (SHORT)" if lenh_cho['side'] == 'SHORT' else "MUA (LONG)"
+                    emoji = "🔴" if lenh_cho['side'] == 'SHORT' else "🟢"
+                    send_telegram(
+                        f"{emoji} <b>DEMO - Đặt lệnh chờ</b>\n\n"
+                        f"📌 Lệnh     : <b>{side_txt}</b>\n"
+                        f"🎯 Chờ giá  : <b>{lenh_cho['entry']}</b>\n"
+                        f"🛑 Cắt lỗ   : <b>{lenh_cho['sl']}</b>\n"
+                        f"✅ Chốt lời : <b>{lenh_cho['tp']}</b>\n"
+                        f"⏰ Đặt lúc  : <b>{gio} (GMT+7)</b>\n\n"
+                        f"<i>⏳ Chờ giá retest vùng OB để vào lệnh...</i>"
+                    )
+                    print(f"[{now_str}] DEMO CHO LENH {lenh_cho['side']} @ {lenh_cho['entry']}")
             else:
+                # Kiểm tra lệnh chờ có được fill chưa
+                if demo.lenh_cho is not None:
+                    ket_qua = demo.kiem_tra_cho(fresh_price)
+                    if ket_qua == 'FILLED' and demo.lenh_mo is not None:
+                        send_telegram(format_demo_open_msg(demo.lenh_mo))
+                        print(f"[{now_str}] DEMO FILLED @ {demo.lenh_mo['entry']}")
+                    elif ket_qua == 'EXPIRED':
+                        send_telegram(
+                            f"⚪ <b>DEMO - Hủy lệnh chờ</b>\n\n"
+                            f"Giá không retest về entry trong thời gian chờ.\n"
+                            f"<i>⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)</i>"
+                        )
+                        print(f"[{now_str}] DEMO EXPIRED - gia khong retest")
                 print(f"[{now_str}] Gia:{fresh_price} | Tin hieu cu ({signal['side']}) - bo qua")
         else:
+            # Hết tín hiệu → hủy lệnh chờ nếu có
+            if demo.lenh_cho is not None:
+                demo.lenh_cho = None
+                print(f"[{now_str}] Het tin hieu, huy lenh cho")
             if last_signal_key is not None:
                 print(f"[{now_str}] Het tin hieu, reset signal key")
                 last_signal_key = None
