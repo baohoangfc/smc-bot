@@ -709,7 +709,6 @@ while True:
                 print(f"[{now_str}] TIN HIEU {signal['side']} @ {round(signal['entry'],2)}")
                 last_signal_key = sig_key
 
-                # [3] Mở lệnh demo NGAY khi có tín hiệu
                 lenh_demo = demo.mo_lenh(signal, price)
                 if lenh_demo:
                     send_telegram(format_demo_open_msg(lenh_demo))
@@ -717,6 +716,10 @@ while True:
             else:
                 print(f"[{now_str}] Gia:{price} | Tin hieu cu ({signal['side']}) - bo qua")
         else:
+            # Hết tín hiệu → xóa key để sẵn sàng bắn tín hiệu mới
+            if last_signal_key is not None:
+                print(f"[{now_str}] Het tin hieu, reset signal key")
+                last_signal_key = None
             print(f"[{now_str}] Gia:{price} | Chua co tin hieu")
 
         # ==========================================
