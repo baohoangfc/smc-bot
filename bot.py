@@ -488,10 +488,9 @@ def format_status_msg(price_gc, price_xau, tf, signal, next_time_str):
 
     return (
         f"🤖 <b>SMC Bot - Cập nhật {gio} (GMT+7)</b>\n\n"
-        f"Giá GOLD (GC=F)  : <b>{price_gc}</b>\n"
-        f"Giá XAUUSD (Spot): <b>{xau_str}</b>\n"
-        f"Khung TG   : <b>{tf}</b>\n"
-        f"Trạng thái : ✅ Đang chạy\n\n"
+        f"Giá XAUUSDT : <b>{xau_str}</b>\n"
+        f"Khung TG    : <b>{tf}</b>\n"
+        f"Trạng thái  : ✅ Đang chạy\n\n"
         f"{sig_info}\n\n"
         f"<i>Cập nhật tiếp theo lúc {next_time_str}</i>"
     )
