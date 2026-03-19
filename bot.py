@@ -687,14 +687,17 @@ while True:
         # ==========================================
         # [3] DEMO - Kiểm tra SL/TP → bắn NGAY
         # ==========================================
+        sltp_hit = False
         if demo.lenh_mo is not None:
             trang_thai, lenh_data = demo.cap_nhat(price)
-            if trang_thai == 'TP':
+            if trang_thai == 'TP' and lenh_data:
                 send_telegram(format_demo_close_msg(lenh_data, 'TP'))
-                print(f"[{now_str}] DEMO TP | +${lenh_data['pnl_final']}")
-            elif trang_thai == 'SL':
+                print(f"[{now_str}] DEMO TP | +${lenh_data.get('pnl_final',0)}")
+                sltp_hit = True
+            elif trang_thai == 'SL' and lenh_data:
                 send_telegram(format_demo_close_msg(lenh_data, 'SL'))
-                print(f"[{now_str}] DEMO SL | -${abs(lenh_data['pnl_sl'])}")
+                print(f"[{now_str}] DEMO SL | -${abs(lenh_data.get('pnl_sl',0))}")
+                sltp_hit = True
 
         # ==========================================
         # [1] TÍN HIỆU → scan và bắn NGAY nếu có mới
@@ -721,10 +724,12 @@ while True:
         # [4] TRẠNG THÁI LỆNH DEMO → mỗi 1 phút nếu đang mở
         # ==========================================
         elapsed_demo = (now_vn() - last_demo_status_t).total_seconds()
-        if demo.lenh_mo is not None and elapsed_demo >= DEMO_STATUS_INTERVAL:
-            demo.cap_nhat(price)
-            send_telegram(format_demo_status_msg(demo, price))
-            print(f"[{now_str}] Da gui demo status | PnL tam: ${demo.lenh_mo.get('pnl_now',0)}")
+        if demo.lenh_mo is not None and elapsed_demo >= DEMO_STATUS_INTERVAL and not sltp_hit:
+            ts, ld = demo.cap_nhat(price)
+            if ts == 'OPEN' and demo.lenh_mo is not None:
+                pnl_now = demo.lenh_mo.get('pnl_now', 0)
+                send_telegram(format_demo_status_msg(demo, price))
+                print(f"[{now_str}] Da gui demo status | PnL tam: ${pnl_now}")
             last_demo_status_t = now_vn()
 
         # ==========================================
