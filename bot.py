@@ -117,6 +117,21 @@ def fetch_data(interval="15m", candles=500):
         print(f"Yahoo loi: {e}")
         return None
 
+def fetch_xauusd_price():
+    """Lấy giá XAUUSD spot từ Yahoo"""
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X"
+        r   = requests.get(url, params={"interval":"1m","range":"1d"},
+                           headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+        raw    = r.json()
+        result = raw.get("chart",{}).get("result",[])
+        if not result: return None
+        closes = result[0]["indicators"]["quote"][0]["close"]
+        closes = [x for x in closes if x is not None]
+        return round(closes[-1], 2) if closes else None
+    except:
+        return None
+
 # ==========================================
 # INDICATORS
 # ==========================================
@@ -433,8 +448,9 @@ def format_signal_msg(signal, price, tf):
         f"<i>⚠️ Chỉ tham khảo, tự xác nhận trước khi vào lệnh</i>"
     )
 
-def format_status_msg(price, tf, signal, next_time_str):
+def format_status_msg(price_gc, price_xau, tf, signal, next_time_str):
     gio = now_vn().strftime('%H:%M')
+    xau_str = f"{price_xau}" if price_xau else "N/A"
     if signal:
         side  = signal['side']
         lenh  = "MUA (LONG)" if side == "LONG" else "BÁN (SHORT)"
@@ -451,7 +467,8 @@ def format_status_msg(price, tf, signal, next_time_str):
 
     return (
         f"🤖 <b>SMC Bot - Cập nhật {gio} (GMT+7)</b>\n\n"
-        f"Giá GOLD   : <b>{price}</b>\n"
+        f"Giá GOLD (GC=F)  : <b>{price_gc}</b>\n"
+        f"Giá XAUUSD (Spot): <b>{xau_str}</b>\n"
         f"Khung TG   : <b>{tf}</b>\n"
         f"Trạng thái : ✅ Đang chạy\n\n"
         f"{sig_info}\n\n"
@@ -758,14 +775,14 @@ while True:
         # ==========================================
         elapsed_health = (now_vn() - last_health_time).total_seconds()
         if elapsed_health >= HEALTH_INTERVAL:
-            next_str = (now_vn() + timedelta(minutes=15)).strftime('%H:%M')
-            send_telegram(format_status_msg(price, INTERVAL, signal, next_str))
-            # Gửi kèm trạng thái demo nếu có lệnh đang mở
+            next_str   = (now_vn() + timedelta(minutes=15)).strftime('%H:%M')
+            xau_price  = fetch_xauusd_price()
+            send_telegram(format_status_msg(price, xau_price, INTERVAL, signal, next_str))
             if demo.lenh_mo is not None:
                 demo.cap_nhat(price)
                 if demo.lenh_mo is not None:
                     send_telegram(format_demo_status_msg(demo, price))
-            print(f"[{now_str}] Da gui health check")
+            print(f"[{now_str}] Da gui health check | GC=F:{price} XAUUSD:{xau_price}")
             last_health_time = now_vn()
 
         # ==========================================
