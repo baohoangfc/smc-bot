@@ -238,6 +238,172 @@ def scan_signal(df):
     return None
 
 # ==========================================
+# BACKTEST TRONG NGÀY
+# ==========================================
+def run_daily_backtest(df, target_date=None):
+    """
+    Chạy backtest SMC cho 1 ngày cụ thể (mặc định hôm nay GMT+7)
+    Trả về list các lệnh đã xử lý trong ngày đó
+    """
+    if target_date is None:
+        target_date = now_vn().date()
+
+    sh = swing_highs(df, n=3)
+    sl = swing_lows(df,  n=3)
+
+    trades      = []
+    lenh_mo     = None
+    ob_pending  = None
+    ob_ttl      = 0
+    RR_BT       = RR
+    MAX_HOLD    = 32
+
+    for i in range(10, len(df)):
+        row_date = pd.to_datetime(df['datetime'].iloc[i]).date()
+
+        c = df['close'].iloc[i]
+        h = df['high'].iloc[i]
+        l = df['low'].iloc[i]
+
+        # --- Quản lý lệnh đang mở ---
+        if lenh_mo is not None:
+            lenh_mo['held'] += 1
+
+            if lenh_mo['held'] >= MAX_HOLD:
+                pnl = 1 if (c > lenh_mo['entry'] and lenh_mo['type']=='LONG') or \
+                           (c < lenh_mo['entry'] and lenh_mo['type']=='SHORT') else -1
+                lenh_mo.update({'result':'TIMEOUT','pnl_r': round(pnl*0.3,1), 'exit_time': str(df['datetime'].iloc[i])})
+                if row_date == target_date or lenh_mo['trade_date'] == target_date:
+                    trades.append(dict(lenh_mo))
+                lenh_mo = None
+                continue
+
+            if lenh_mo['type'] == 'LONG':
+                if h >= lenh_mo['entry']+(lenh_mo['entry']-lenh_mo['sl']) and not lenh_mo.get('be'):
+                    lenh_mo['sl'] = lenh_mo['entry']+1; lenh_mo['be']=True
+                if l <= lenh_mo['sl']:
+                    pnl_r = 0.0 if lenh_mo.get('be') else -1.0
+                    lenh_mo.update({'result':'BE' if lenh_mo.get('be') else 'LOSS','pnl_r':pnl_r,'exit_time':str(df['datetime'].iloc[i])})
+                    if lenh_mo['trade_date'] == target_date:
+                        trades.append(dict(lenh_mo))
+                    lenh_mo = None
+                elif h >= lenh_mo['tp']:
+                    lenh_mo.update({'result':'WIN','pnl_r':RR_BT,'exit_time':str(df['datetime'].iloc[i])})
+                    if lenh_mo['trade_date'] == target_date:
+                        trades.append(dict(lenh_mo))
+                    lenh_mo = None
+
+            elif lenh_mo['type'] == 'SHORT':
+                if l <= lenh_mo['entry']-(lenh_mo['sl']-lenh_mo['entry']) and not lenh_mo.get('be'):
+                    lenh_mo['sl'] = lenh_mo['entry']-1; lenh_mo['be']=True
+                if h >= lenh_mo['sl']:
+                    pnl_r = 0.0 if lenh_mo.get('be') else -1.0
+                    lenh_mo.update({'result':'BE' if lenh_mo.get('be') else 'LOSS','pnl_r':pnl_r,'exit_time':str(df['datetime'].iloc[i])})
+                    if lenh_mo['trade_date'] == target_date:
+                        trades.append(dict(lenh_mo))
+                    lenh_mo = None
+                elif l <= lenh_mo['tp']:
+                    lenh_mo.update({'result':'WIN','pnl_r':RR_BT,'exit_time':str(df['datetime'].iloc[i])})
+                    if lenh_mo['trade_date'] == target_date:
+                        trades.append(dict(lenh_mo))
+                    lenh_mo = None
+            continue
+
+        # --- Tìm CHoCH + OB ---
+        sig = detect_structure(df, sh, sl, i)
+        if sig:
+            ob = find_ob(df, sig, i, lookback=20)
+            if ob:
+                ob_pending = ob
+                ob_ttl = 0
+
+        if ob_pending:
+            ob_ttl += 1
+            if ob_ttl > 40:
+                ob_pending = None
+
+        # --- Vào lệnh ---
+        if ob_pending and lenh_mo is None:
+            ob = ob_pending
+            if ob['type'] == 'BULL_OB' and valid_long(df, i, ob) and bull_confirm(df, i):
+                e, sl_, tp = sltp_long(df, i, ob)
+                if e and (e - sl_) > 2:
+                    lenh_mo = {
+                        'type':'LONG','entry':round(e,2),'sl':round(sl_,2),'tp':round(tp,2),
+                        'entry_time':str(df['datetime'].iloc[i]),
+                        'trade_date': pd.to_datetime(df['datetime'].iloc[i]).date(),
+                        'held':0,'be':False
+                    }
+                    ob_pending = None
+            elif ob['type'] == 'BEAR_OB' and valid_short(df, i, ob) and bear_confirm(df, i):
+                e, sl_, tp = sltp_short(df, i, ob)
+                if e and (sl_ - e) > 2:
+                    lenh_mo = {
+                        'type':'SHORT','entry':round(e,2),'sl':round(sl_,2),'tp':round(tp,2),
+                        'entry_time':str(df['datetime'].iloc[i]),
+                        'trade_date': pd.to_datetime(df['datetime'].iloc[i]).date(),
+                        'held':0,'be':False
+                    }
+                    ob_pending = None
+
+    return trades
+
+
+def format_daily_backtest_msg(trades, target_date):
+    ngay = target_date.strftime('%d/%m/%Y')
+    gio  = now_vn().strftime('%H:%M')
+
+    if not trades:
+        return (
+            f"📋 <b>Backtest trong ngày {ngay}</b>\n\n"
+            f"Không có lệnh nào được kích hoạt hôm nay.\n"
+            f"<i>⏰ Cập nhật lúc {gio} (GMT+7)</i>"
+        )
+
+    thang  = [t for t in trades if t.get('result') == 'WIN']
+    thua   = [t for t in trades if t.get('result') == 'LOSS']
+    be     = [t for t in trades if t.get('result') == 'BE']
+    total_r = sum(t.get('pnl_r', 0) for t in trades)
+    winrate = round(len(thang) / len(trades) * 100) if trades else 0
+
+    icon_total = "🟢" if total_r > 0 else ("🔴" if total_r < 0 else "⚪")
+    lines = [
+        f"📋 <b>Backtest trong ngày {ngay}</b>\n",
+        f"Tổng lệnh : <b>{len(trades)}</b>  |  Thắng: <b>{len(thang)}</b>  Thua: <b>{len(thua)}</b>  BE: <b>{len(be)}</b>",
+        f"Winrate   : <b>{winrate}%</b>",
+        f"Tổng R    : {icon_total} <b>{'+' if total_r>0 else ''}{total_r}R</b>\n",
+        "─────────────────────",
+    ]
+
+    for idx, t in enumerate(trades, 1):
+        res    = t.get('result', '?')
+        emoji  = "✅" if res=='WIN' else ("❌" if res=='LOSS' else ("⚪" if res=='BE' else "⏱"))
+        side   = "MUA" if t['type']=='LONG' else "BÁN"
+        # Lấy giờ vào lệnh
+        try:
+            gio_vao = pd.to_datetime(t['entry_time']).strftime('%H:%M')
+        except:
+            gio_vao = '--:--'
+        try:
+            gio_ra = pd.to_datetime(t.get('exit_time','')).strftime('%H:%M')
+        except:
+            gio_ra = '--:--'
+
+        pnl_r = t.get('pnl_r', 0)
+        pnl_str = f"+{pnl_r}R" if pnl_r > 0 else (f"{pnl_r}R" if pnl_r < 0 else "0R (BE)")
+
+        lines.append(
+            f"{emoji} <b>Lệnh {idx}: {side}</b>  [{gio_vao} → {gio_ra}]\n"
+            f"   Vào: <b>{t['entry']}</b>  SL: <b>{t['sl']}</b>  TP: <b>{t['tp']}</b>\n"
+            f"   Kết quả: <b>{res}</b>  ({pnl_str})"
+        )
+
+    lines.append(f"\n<i>⏰ Cập nhật lúc {gio} (GMT+7)</i>")
+    lines.append(f"<i>⚠️ Chỉ tham khảo, không phải lệnh thật</i>")
+    return "\n".join(lines)
+
+
+# ==========================================
 # FORMAT TIN NHẮN TIẾNG VIỆT
 # ==========================================
 def format_signal_msg(signal, price, tf):
@@ -318,20 +484,31 @@ def format_nodata_msg():
 print(f"Bot SMC khoi dong | {INTERVAL} | Chi ban phut :00,:05,:10,...")
 send_telegram(format_startup_msg(INTERVAL, 5))
 
-last_signal_key  = None
-last_status_time = now_vn() - timedelta(minutes=10)
-STATUS_INTERVAL  = 10 * 60  # gửi status mỗi 10 phút
+last_signal_key      = None
+last_status_time     = now_vn() - timedelta(minutes=10)
+STATUS_INTERVAL      = 10 * 60
+last_checked_min     = -1
+last_backtest_date   = None   # ngày đã gửi báo cáo backtest
+BACKTEST_HOUR        = 20     # gửi lúc 20:00 GMT+7 mỗi ngày
 
 while True:
     try:
         vn_now  = now_vn()
         now_str = vn_now.strftime('%H:%M:%S')
 
+        cur_min = vn_now.minute
+
         # ⏰ BỘ LỌC THỜI GIAN: chỉ chạy khi phút có đuôi 0 hoặc 5
         if not is_valid_minute():
-            print(f"[{now_str}] Bo qua (phut :{vn_now.minute:02d})")
-            time.sleep(30)  # ngủ 30s rồi kiểm tra lại
+            print(f"[{now_str}] Bo qua (phut :{cur_min:02d})")
+            time.sleep(20)
             continue
+
+        # Tránh chạy lặp 2 lần trong cùng 1 phút
+        if cur_min == last_checked_min:
+            time.sleep(20)
+            continue
+        last_checked_min = cur_min
 
         df = fetch_data(INTERVAL, candles=500)
 
@@ -363,20 +540,23 @@ while True:
         # --- GỬI TRẠNG THÁI MỖI 10 PHÚT ---
         elapsed = (now_vn() - last_status_time).total_seconds()
         if elapsed >= STATUS_INTERVAL:
-            next_time = now_vn() + timedelta(minutes=10)
-            # Làm tròn đến phút :x0 hoặc :x5 tiếp theo
-            next_min = next_time.minute
-            next_valid = next_min + (5 - next_min % 5) if next_min % 5 != 0 else next_min
-            next_time  = next_time.replace(minute=next_valid % 60, second=0)
-            next_str   = next_time.strftime('%H:%M')
-
+            next_str = (now_vn() + timedelta(minutes=10)).strftime('%H:%M')
             send_telegram(format_status_msg(price, INTERVAL, signal, next_str))
             print(f"[{now_str}] Da gui status Telegram")
             last_status_time = now_vn()
 
-        # Ngủ đến hết phút hiện tại + buffer 5s
-        sleep_secs = 60 - now_vn().second + 5
-        time.sleep(sleep_secs)
+        # --- GỬI BACKTEST TRONG NGÀY lúc 20:00 GMT+7 ---
+        today = vn_now.date()
+        if vn_now.hour == BACKTEST_HOUR and last_backtest_date != today:
+            print(f"[{now_str}] Dang chay backtest trong ngay {today}...")
+            bt_trades = run_daily_backtest(df, target_date=today)
+            bt_msg    = format_daily_backtest_msg(bt_trades, today)
+            send_telegram(bt_msg)
+            last_backtest_date = today
+            print(f"[{now_str}] Da gui backtest {today}: {len(bt_trades)} lenh")
+
+        # Ngủ 30s rồi check lại (đảm bảo không bỏ sót phút :x5/:x0)
+        time.sleep(30)
 
     except KeyboardInterrupt:
         print("\nBot dung.")
