@@ -854,6 +854,23 @@ while True:
         fresh_price = fetch_latest_price() or price
 
         # ==========================================
+        # [0] DEMO - Kiểm tra lệnh chờ → fill nếu giá chạm entry
+        # (Chạy độc lập, không phụ thuộc tín hiệu còn hay mất)
+        # ==========================================
+        if demo.lenh_cho is not None and demo.lenh_mo is None:
+            ket_qua = demo.kiem_tra_cho(fresh_price)
+            if ket_qua == 'FILLED' and demo.lenh_mo is not None:
+                send_telegram(format_demo_open_msg(demo.lenh_mo))
+                print(f"[{now_str}] DEMO FILLED @ {demo.lenh_mo['entry']}")
+            elif ket_qua == 'EXPIRED':
+                send_telegram(
+                    f"⚪ <b>DEMO - Hủy lệnh chờ</b>\n\n"
+                    f"Giá không retest về entry trong thời gian chờ.\n"
+                    f"<i>⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)</i>"
+                )
+                print(f"[{now_str}] DEMO EXPIRED")
+
+        # ==========================================
         # [3] DEMO - Kiểm tra SL/TP → bắn NGAY
         # ==========================================
         sltp_hit = False
@@ -879,42 +896,26 @@ while True:
                 print(f"[{now_str}] TIN HIEU {signal['side']} @ {round(signal['entry'],2)}")
                 last_signal_key = sig_key
 
-                # Đặt lệnh chờ - chờ giá retest về entry OB
-                lenh_cho = demo.mo_lenh(signal, fresh_price)
-                if lenh_cho:
-                    gio = now_vn().strftime('%d/%m %H:%M')
-                    side_txt = "BÁN (SHORT)" if lenh_cho['side'] == 'SHORT' else "MUA (LONG)"
-                    emoji = "🔴" if lenh_cho['side'] == 'SHORT' else "🟢"
-                    send_telegram(
-                        f"{emoji} <b>DEMO - Đặt lệnh chờ</b>\n\n"
-                        f"📌 Lệnh     : <b>{side_txt}</b>\n"
-                        f"🎯 Chờ giá  : <b>{lenh_cho['entry']}</b>\n"
-                        f"🛑 Cắt lỗ   : <b>{lenh_cho['sl']}</b>\n"
-                        f"✅ Chốt lời : <b>{lenh_cho['tp']}</b>\n"
-                        f"⏰ Đặt lúc  : <b>{gio} (GMT+7)</b>\n\n"
-                        f"<i>⏳ Chờ giá retest vùng OB để vào lệnh...</i>"
-                    )
-                    print(f"[{now_str}] DEMO CHO LENH {lenh_cho['side']} @ {lenh_cho['entry']}")
-            else:
-                # Kiểm tra lệnh chờ có được fill chưa
-                if demo.lenh_cho is not None:
-                    ket_qua = demo.kiem_tra_cho(fresh_price)
-                    if ket_qua == 'FILLED' and demo.lenh_mo is not None:
-                        send_telegram(format_demo_open_msg(demo.lenh_mo))
-                        print(f"[{now_str}] DEMO FILLED @ {demo.lenh_mo['entry']}")
-                    elif ket_qua == 'EXPIRED':
+                # Đặt lệnh chờ nếu chưa có lệnh nào
+                if demo.lenh_mo is None and demo.lenh_cho is None:
+                    lenh_cho = demo.mo_lenh(signal, fresh_price)
+                    if lenh_cho:
+                        gio = now_vn().strftime('%d/%m %H:%M')
+                        side_txt = "BÁN (SHORT)" if lenh_cho['side'] == 'SHORT' else "MUA (LONG)"
+                        emoji_l  = "🔴" if lenh_cho['side'] == 'SHORT' else "🟢"
                         send_telegram(
-                            f"⚪ <b>DEMO - Hủy lệnh chờ</b>\n\n"
-                            f"Giá không retest về entry trong thời gian chờ.\n"
-                            f"<i>⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)</i>"
+                            f"{emoji_l} <b>DEMO - Đặt lệnh chờ</b>\n\n"
+                            f"📌 Lệnh     : <b>{side_txt}</b>\n"
+                            f"🎯 Chờ giá  : <b>{lenh_cho['entry']}</b>\n"
+                            f"🛑 Cắt lỗ   : <b>{lenh_cho['sl']}</b>\n"
+                            f"✅ Chốt lời : <b>{lenh_cho['tp']}</b>\n"
+                            f"⏰ Đặt lúc  : <b>{gio} (GMT+7)</b>\n\n"
+                            f"<i>⏳ Chờ giá retest vùng OB để vào lệnh...</i>"
                         )
-                        print(f"[{now_str}] DEMO EXPIRED - gia khong retest")
+                        print(f"[{now_str}] DEMO CHO LENH {lenh_cho['side']} @ {lenh_cho['entry']}")
+            else:
                 print(f"[{now_str}] Gia:{fresh_price} | Tin hieu cu ({signal['side']}) - bo qua")
         else:
-            # Hết tín hiệu → hủy lệnh chờ nếu có
-            if demo.lenh_cho is not None:
-                demo.lenh_cho = None
-                print(f"[{now_str}] Het tin hieu, huy lenh cho")
             if last_signal_key is not None:
                 print(f"[{now_str}] Het tin hieu, reset signal key")
                 last_signal_key = None
@@ -949,22 +950,69 @@ while True:
             last_health_time = now_vn()
 
         # ==========================================
-        # BACKTEST TRONG NGÀY → lúc 20:00 GMT+7
+        # BACKTEST CUỐI NGÀY → 20:00 GMT+7
         # ==========================================
         today = vn_now.date()
         if vn_now.hour == BACKTEST_HOUR and last_backtest_date != today:
-            print(f"[{now_str}] Dang chay backtest trong ngay {today}...")
+            print(f"[{now_str}] Dang chay backtest ngay {today}...")
             bt_trades = run_daily_backtest(df, target_date=today)
             bt_msg    = format_daily_backtest_msg(bt_trades, today, demo_tracker=demo)
             send_telegram(bt_msg)
             last_backtest_date = today
             print(f"[{now_str}] Da gui backtest {today}: {len(bt_trades)} lenh")
-
             # Reset demo tracker sang ngày mới
             demo = DemoTracker(margin=10, leverage=200)
-            print(f"[{now_str}] Da reset Demo Tracker cho ngay moi")
+            print(f"[{now_str}] Da reset Demo Tracker")
 
-        time.sleep(10)  # vòng lặp 10s → tín hiệu bắn nhanh hơn
+        # ==========================================
+        # BÁO CÁO TỔNG HỢP SÁNG → 07:00 GMT+7
+        # (Gửi lại summary ngày hôm qua kèm lịch sử tích lũy)
+        # ==========================================
+        yesterday = (vn_now - timedelta(days=1)).date()
+        if vn_now.hour == 7 and last_backtest_date != today:
+            history = load_history()
+            if history["days"]:
+                total_trades = history['total_win'] + history['total_loss'] + history['total_be']
+                total_wr     = round(history['total_win'] / total_trades * 100) if total_trades > 0 else 0
+                cum_dpnl     = history.get('demo_total_pnl', 0)
+                n_days       = len(history['days'])
+
+                def pi(v): return "🟢" if v > 0 else ("🔴" if v < 0 else "⚪")
+                def rf(v): return f"+{v}R" if v > 0 else f"{v}R"
+                def uf(v): return f"+${v}" if v > 0 else f"-${abs(v)}"
+
+                # 7 ngày gần nhất
+                recent = history["days"][-7:]
+                rows   = ""
+                for d in recent:
+                    dr  = d.get('total_r', 0)
+                    dp  = d.get('demo_pnl', 0)
+                    rows += (
+                        f"  📅 <b>{d['date']}</b>\n"
+                        f"     BT: {pi(dr)}{rf(dr)}  |  Demo: {pi(dp)}{uf(dp)}\n"
+                        f"     ✅{d.get('win',0)} ❌{d.get('loss',0)} ⬜{d.get('be',0)}  WR:{d.get('winrate',0)}%\n"
+                    )
+
+                morning_msg = (
+                    f"🌅 <b>BÁO CÁO TỔNG HỢP - {vn_now.strftime('%d/%m/%Y')}</b>\n\n"
+                    f"{'═'*24}\n"
+                    f"📆 <b>LỊCH SỬ {n_days} NGÀY GẦN NHẤT</b>\n"
+                    f"{'─'*24}\n"
+                    f"{rows}"
+                    f"{'═'*24}\n"
+                    f"📊 <b>TỔNG CỘNG</b>\n"
+                    f"{'─'*24}\n"
+                    f"  Tổng lệnh : <b>{total_trades}</b>  (✅{history['total_win']} ❌{history['total_loss']} ⬜{history['total_be']})\n"
+                    f"  Winrate   : <b>{total_wr}%</b>\n"
+                    f"  Backtest  : {pi(history['total_r'])} <b>{rf(history['total_r'])}</b>\n"
+                    f"  Demo P&L  : {pi(cum_dpnl)} <b>{uf(cum_dpnl)}</b>\n"
+                    f"{'═'*24}\n"
+                    f"<i>⏰ 07:00 (GMT+7) | Chúc giao dịch tốt hôm nay! 💪</i>"
+                )
+                send_telegram(morning_msg)
+                print(f"[{now_str}] Da gui bao cao tong hop sang")
+
+        time.sleep(10)
 
     except KeyboardInterrupt:
         print("\nBot dung.")
