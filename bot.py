@@ -265,19 +265,49 @@ def sltp_short(df, i, ob):
     return entry, sl, entry-risk*RR
 
 def scan_signal(df):
+    """
+    Quét tín hiệu live - dùng CÙNG logic với backtest.
+    Chỉ lấy tín hiệu từ nến cuối cùng (nến mới nhất).
+    """
     sh = swing_highs(df, n=3)
     sl = swing_lows(df,  n=3)
-    for i in range(len(df)-1, max(len(df)-150, 10), -1):
+
+    ob_pending = None
+    ob_ttl     = 0
+
+    # Quét từ đầu để tìm OB đang active (giống backtest)
+    for i in range(10, len(df)):
         sig = detect_structure(df, sh, sl, i)
-        if not sig: continue
-        ob = find_ob(df, sig, i, lookback=20)
-        if not ob: continue
-        if ob['type']=='BULL_OB' and valid_long(df,i,ob) and bull_confirm(df,i):
-            e,sl_,tp = sltp_long(df,i,ob)
-            if e: return {'side':'LONG','entry':e,'sl':sl_,'tp':tp,'candle_time':str(df['datetime'].iloc[i])}
-        elif ob['type']=='BEAR_OB' and valid_short(df,i,ob) and bear_confirm(df,i):
-            e,sl_,tp = sltp_short(df,i,ob)
-            if e: return {'side':'SHORT','entry':e,'sl':sl_,'tp':tp,'candle_time':str(df['datetime'].iloc[i])}
+        if sig:
+            ob = find_ob(df, sig, i, lookback=20)
+            if ob:
+                ob_pending = ob
+                ob_ttl = 0
+
+        if ob_pending:
+            ob_ttl += 1
+            if ob_ttl > 40:
+                ob_pending = None
+
+        # Chỉ trả tín hiệu nếu là nến cuối (nến live)
+        if i == len(df) - 1 and ob_pending:
+            ob = ob_pending
+            if ob['type'] == 'BULL_OB' and valid_long(df, i, ob) and bull_confirm(df, i):
+                e, sl_, tp = sltp_long(df, i, ob)
+                if e:
+                    return {
+                        'side': 'LONG', 'entry': round(e,2),
+                        'sl': round(sl_,2), 'tp': round(tp,2),
+                        'candle_time': str(df['datetime'].iloc[i])
+                    }
+            elif ob['type'] == 'BEAR_OB' and valid_short(df, i, ob) and bear_confirm(df, i):
+                e, sl_, tp = sltp_short(df, i, ob)
+                if e:
+                    return {
+                        'side': 'SHORT', 'entry': round(e,2),
+                        'sl': round(sl_,2), 'tp': round(tp,2),
+                        'candle_time': str(df['datetime'].iloc[i])
+                    }
     return None
 
 # ==========================================
@@ -614,44 +644,78 @@ class DemoTracker:
     Theo dõi lệnh demo theo tín hiệu SMC
     Margin: $10, Đòn bẩy: x200 → Notional: $2000
     PnL tính theo: (Δgiá / entry) * notional
+    ĐỒNG BỘ với backtest: dùng cùng entry/SL/TP từ scan_signal
     """
     def __init__(self, margin=10, leverage=200):
         self.margin    = margin
         self.leverage  = leverage
         self.notional  = margin * leverage
-        self.lenh_mo   = None   # lệnh đang mở
-        self.lenh_cho  = None   # lệnh đang chờ entry
-        self.lich_su   = []     # lịch sử lệnh đã đóng
+        self.lenh_mo   = None
+        self.lenh_cho  = None
+        self.lich_su   = []
+
+    def _calc_pnl(self, entry, sl, tp):
+        risk_r = abs(entry - sl)
+        tp_r   = abs(tp - entry)
+        pnl_sl = round(-abs(risk_r / entry * self.notional), 2)
+        pnl_tp = round( abs(tp_r  / entry * self.notional), 2)
+        return pnl_sl, pnl_tp
 
     def mo_lenh(self, signal, price):
-        """Đặt lệnh demo chờ - chỉ mở khi giá chạm đúng entry từ tín hiệu SMC"""
+        """Đặt lệnh chờ retest OB - dùng đúng entry/SL/TP từ tín hiệu"""
         if self.lenh_mo is not None or self.lenh_cho is not None:
             return None
 
         side  = signal['side']
-        entry = round(signal['entry'], 2)  # đúng entry từ tín hiệu
+        entry = round(signal['entry'], 2)
         sl    = round(signal['sl'], 2)
         tp    = round(signal['tp'], 2)
-
-        risk_r = abs(entry - sl)
-        tp_r   = abs(tp - entry)
-        pnl_sl = round(-abs(risk_r / entry * self.notional), 4)
-        pnl_tp = round( abs(tp_r  / entry * self.notional), 4)
+        pnl_sl, pnl_tp = self._calc_pnl(entry, sl, tp)
 
         self.lenh_cho = {
-            'side':      side,
-            'entry':     entry,
-            'sl':        sl,
-            'tp':        tp,
-            'pnl_sl':    pnl_sl,
-            'pnl_tp':    pnl_tp,
-            'margin':    self.margin,
-            'leverage':  self.leverage,
-            'notional':  self.notional,
+            'side': side, 'entry': entry, 'sl': sl, 'tp': tp,
+            'pnl_sl': pnl_sl, 'pnl_tp': pnl_tp,
+            'margin': self.margin, 'leverage': self.leverage, 'notional': self.notional,
             'signal_time': now_vn().strftime('%d/%m %H:%M'),
-            'ttl':       0,  # đếm số lần check, hủy sau 60 lần (~10 phút)
+            'ttl': 0,
         }
         return self.lenh_cho
+
+    def sync_from_backtest(self, bt_trade):
+        """
+        Đồng bộ kết quả từ backtest vào demo tracker.
+        Gọi sau khi chạy run_daily_backtest để đảm bảo demo = backtest.
+        """
+        entry  = bt_trade['entry']
+        sl     = bt_trade['sl']
+        tp     = bt_trade['tp']
+        result = bt_trade.get('result', 'LOSS')
+        pnl_sl, pnl_tp = self._calc_pnl(entry, sl, tp)
+
+        if result == 'WIN':
+            pnl_final = pnl_tp
+        elif result == 'LOSS':
+            pnl_final = pnl_sl
+        else:
+            pnl_final = 0.0
+
+        self.lich_su.append({
+            'side':       bt_trade.get('type', '?'),
+            'entry':      entry,
+            'sl':         sl,
+            'tp':         tp,
+            'pnl_sl':     pnl_sl,
+            'pnl_tp':     pnl_tp,
+            'pnl_final':  pnl_final,
+            'pnl_now':    pnl_final,
+            'price_now':  tp if result == 'WIN' else sl,
+            'notional':   self.notional,
+            'margin':     self.margin,
+            'leverage':   self.leverage,
+            'open_time':  bt_trade.get('entry_time', '')[:16],
+            'close_time': bt_trade.get('exit_time', '')[:16],
+            'status':     'TP ✅' if result == 'WIN' else ('SL ❌' if result == 'LOSS' else 'BE ⬜'),
+        })
 
     def kiem_tra_cho(self, price):
         """Kiểm tra xem giá có chạm entry chưa → mở lệnh thật"""
@@ -956,11 +1020,18 @@ while True:
         if vn_now.hour == BACKTEST_HOUR and last_backtest_date != today:
             print(f"[{now_str}] Dang chay backtest ngay {today}...")
             bt_trades = run_daily_backtest(df, target_date=today)
-            bt_msg    = format_daily_backtest_msg(bt_trades, today, demo_tracker=demo)
+
+            # Đồng bộ kết quả backtest vào demo tracker
+            demo_sync = DemoTracker(margin=10, leverage=200)
+            for t in bt_trades:
+                demo_sync.sync_from_backtest(t)
+
+            bt_msg = format_daily_backtest_msg(bt_trades, today, demo_tracker=demo_sync)
             send_telegram(bt_msg)
             last_backtest_date = today
             print(f"[{now_str}] Da gui backtest {today}: {len(bt_trades)} lenh")
-            # Reset demo tracker sang ngày mới
+
+            # Reset demo tracker live sang ngày mới
             demo = DemoTracker(margin=10, leverage=200)
             print(f"[{now_str}] Da reset Demo Tracker")
 
