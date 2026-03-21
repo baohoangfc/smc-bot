@@ -880,13 +880,41 @@ last_signal_key      = None
 last_health_time     = now_vn()
 last_demo_status_t   = now_vn() - timedelta(minutes=1)
 last_backtest_date   = None
-last_morning_date    = None   # tránh gửi báo cáo sáng 2 lần
-last_fetch_time      = now_vn() - timedelta(minutes=5)
-cached_df            = None
-FETCH_INTERVAL       = 10   # fetch data mỗi 10s
+last_morning_date    = None
 HEALTH_INTERVAL      = 15 * 60
 DEMO_STATUS_INTERVAL = 1 * 60
 BACKTEST_HOUR        = 20
+
+# ── Background data fetcher ──────────────────────────────────
+# Fetch data nặng chạy trên thread riêng mỗi 30s
+# Luồng chính chỉ đọc cache → không bị block → signal bắn nhanh
+
+import threading
+
+_df_cache   = {"df": None, "ts": None}   # shared cache
+_cache_lock = threading.Lock()
+
+def _bg_fetcher():
+    """Thread nền: fetch + indicator mỗi 30s"""
+    while True:
+        try:
+            df = fetch_data(INTERVAL, candles=500)
+            if df is not None:
+                df = add_indicators(df)
+                with _cache_lock:
+                    _df_cache["df"] = df
+                    _df_cache["ts"] = now_vn()
+                print(f"[BG] Data updated | {df['datetime'].iloc[-1]} | close={round(df['close'].iloc[-1],2)}")
+        except Exception as e:
+            print(f"[BG] Fetch error: {e}")
+        time.sleep(30)
+
+bg_thread = threading.Thread(target=_bg_fetcher, daemon=True)
+bg_thread.start()
+print("Background fetcher started")
+
+# Chờ fetch lần đầu
+time.sleep(5)
 
 # Khởi tạo Demo Tracker
 demo = DemoTracker(margin=10, leverage=200)
@@ -896,32 +924,21 @@ while True:
         vn_now  = now_vn()
         now_str = vn_now.strftime('%H:%M:%S')
 
-        # Fetch full data mỗi 30s (tránh rate limit Yahoo)
-        elapsed_fetch = (now_vn() - last_fetch_time).total_seconds()
-        if elapsed_fetch >= FETCH_INTERVAL or cached_df is None:
-            df = fetch_data(INTERVAL, candles=500)
-            if df is not None:
-                cached_df = add_indicators(df)
-                last_fetch_time = now_vn()
-        df = cached_df
+        # Đọc cache (không block)
+        with _cache_lock:
+            df = _df_cache["df"]
 
         if df is None:
-            print(f"[{now_str}] Khong co data")
-            elapsed_health = (now_vn() - last_health_time).total_seconds()
-            if elapsed_health >= HEALTH_INTERVAL:
-                send_telegram(format_nodata_msg())
-                last_health_time = now_vn()
-            time.sleep(10)
+            print(f"[{now_str}] Chua co data, cho...")
+            time.sleep(3)
             continue
 
-        price = round(df['close'].iloc[-1], 2)
-
-        # Lấy giá mới nhất realtime cho tất cả noti
-        fresh_price = fetch_latest_price() or price
+        # Giá realtime nhanh (Binance spot, ~50ms)
+        fresh_price = fetch_latest_price() or round(df['close'].iloc[-1], 2)
+        price       = round(df['close'].iloc[-1], 2)
 
         # ==========================================
-        # [0] DEMO - Kiểm tra lệnh chờ → fill nếu giá chạm entry
-        # (Chạy độc lập, không phụ thuộc tín hiệu còn hay mất)
+        # [0] DEMO - Kiểm tra lệnh chờ → fill NGAY
         # ==========================================
         if demo.lenh_cho is not None and demo.lenh_mo is None:
             ket_qua = demo.kiem_tra_cho(fresh_price)
@@ -1086,7 +1103,7 @@ while True:
                 send_telegram(morning_msg)
                 print(f"[{now_str}] Da gui bao cao tong hop sang")
 
-        time.sleep(10)
+        time.sleep(3)  # check mỗi 3s → tín hiệu bắn trong vòng 3-5s
 
     except KeyboardInterrupt:
         print("\nBot dung.")
