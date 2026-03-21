@@ -267,15 +267,15 @@ def sltp_short(df, i, ob):
 def scan_signal(df):
     """
     Quét tín hiệu live - dùng CÙNG logic với backtest.
-    Chỉ lấy tín hiệu từ nến cuối cùng (nến mới nhất).
+    Lấy tín hiệu từ 5 nến cuối để không bỏ sót.
     """
     sh = swing_highs(df, n=3)
     sl = swing_lows(df,  n=3)
 
     ob_pending = None
     ob_ttl     = 0
+    last_signal = None
 
-    # Quét từ đầu để tìm OB đang active (giống backtest)
     for i in range(10, len(df)):
         sig = detect_structure(df, sh, sl, i)
         if sig:
@@ -289,13 +289,13 @@ def scan_signal(df):
             if ob_ttl > 40:
                 ob_pending = None
 
-        # Chỉ trả tín hiệu nếu là nến cuối (nến live)
-        if i == len(df) - 1 and ob_pending:
+        # Lưu tín hiệu trong 5 nến cuối
+        if i >= len(df) - 5 and ob_pending:
             ob = ob_pending
             if ob['type'] == 'BULL_OB' and valid_long(df, i, ob) and bull_confirm(df, i):
                 e, sl_, tp = sltp_long(df, i, ob)
                 if e:
-                    return {
+                    last_signal = {
                         'side': 'LONG', 'entry': round(e,2),
                         'sl': round(sl_,2), 'tp': round(tp,2),
                         'candle_time': str(df['datetime'].iloc[i])
@@ -303,12 +303,13 @@ def scan_signal(df):
             elif ob['type'] == 'BEAR_OB' and valid_short(df, i, ob) and bear_confirm(df, i):
                 e, sl_, tp = sltp_short(df, i, ob)
                 if e:
-                    return {
+                    last_signal = {
                         'side': 'SHORT', 'entry': round(e,2),
                         'sl': round(sl_,2), 'tp': round(tp,2),
                         'candle_time': str(df['datetime'].iloc[i])
                     }
-    return None
+
+    return last_signal
 
 # ==========================================
 # BACKTEST TRONG NGÀY
@@ -882,7 +883,7 @@ last_backtest_date   = None
 last_morning_date    = None   # tránh gửi báo cáo sáng 2 lần
 last_fetch_time      = now_vn() - timedelta(minutes=5)
 cached_df            = None
-FETCH_INTERVAL       = 30
+FETCH_INTERVAL       = 10   # fetch data mỗi 10s
 HEALTH_INTERVAL      = 15 * 60
 DEMO_STATUS_INTERVAL = 1 * 60
 BACKTEST_HOUR        = 20
@@ -895,7 +896,7 @@ while True:
         vn_now  = now_vn()
         now_str = vn_now.strftime('%H:%M:%S')
 
-        # Fetch data mỗi 30s, dùng cache cho các vòng giữa
+        # Fetch full data mỗi 30s (tránh rate limit Yahoo)
         elapsed_fetch = (now_vn() - last_fetch_time).total_seconds()
         if elapsed_fetch >= FETCH_INTERVAL or cached_df is None:
             df = fetch_data(INTERVAL, candles=500)
