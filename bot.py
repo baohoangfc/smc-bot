@@ -879,9 +879,10 @@ last_signal_key      = None
 last_health_time     = now_vn()
 last_demo_status_t   = now_vn() - timedelta(minutes=1)
 last_backtest_date   = None
+last_morning_date    = None   # tránh gửi báo cáo sáng 2 lần
 last_fetch_time      = now_vn() - timedelta(minutes=5)
 cached_df            = None
-FETCH_INTERVAL       = 30    # fetch API mỗi 30s
+FETCH_INTERVAL       = 30
 HEALTH_INTERVAL      = 15 * 60
 DEMO_STATUS_INTERVAL = 1 * 60
 BACKTEST_HOUR        = 20
@@ -1040,7 +1041,8 @@ while True:
         # (Gửi lại summary ngày hôm qua kèm lịch sử tích lũy)
         # ==========================================
         yesterday = (vn_now - timedelta(days=1)).date()
-        if vn_now.hour == 7 and last_backtest_date != today:
+        if vn_now.hour == 7 and last_morning_date != today:
+            last_morning_date = today  # đánh dấu ngay để không gửi lại
             history = load_history()
             if history["days"]:
                 total_trades = history['total_win'] + history['total_loss'] + history['total_be']
