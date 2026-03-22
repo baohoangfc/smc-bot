@@ -944,10 +944,11 @@ while True:
             time.sleep(3)
             continue
 
+        price = round(df['close'].iloc[-1], 2)
+
         # Giá realtime nhanh (Binance spot, ~50ms)
         fresh_price = fetch_latest_price()
         if fresh_price is None or fresh_price == price:
-            # Nếu giá không đổi hoặc lỗi → dùng giá từ data cache
             fresh_price = price
         print(f"[{now_str}] Gia: {fresh_price} (cache: {price})")
 
