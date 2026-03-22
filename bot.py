@@ -119,33 +119,44 @@ def fetch_data(interval="15m", candles=500):
         return None
 
 def fetch_latest_price():
-    """Lấy giá XAUUSDT realtime từ Binance spot (không bị block như futures)"""
-    sources = [
-        # Binance spot - thường không bị block
-        ("https://api.binance.com/api/v3/ticker/price", {"symbol": "XAUUSDT"}),
-        # Backup: Yahoo GC=F
-        ("https://query1.finance.yahoo.com/v8/finance/chart/GC=F", {"interval":"1m","range":"1d"}),
-    ]
-    # Thử Binance spot trước
+    """Lấy giá XAUUSDT realtime - thử nhiều nguồn"""
+    # Nguồn 1: Binance spot (nhanh nhất)
     try:
-        r   = requests.get(sources[0][0], params=sources[0][1], timeout=8)
-        raw = r.json()
-        if "price" in raw:
-            return round(float(raw["price"]), 2)
+        r = requests.get(
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbol": "XAUUSDT"},
+            timeout=5
+        )
+        data = r.json()
+        if "price" in data:
+            p = round(float(data["price"]), 2)
+            if p > 100:  # sanity check
+                return p
     except:
         pass
-    # Fallback Yahoo
+
+    # Nguồn 2: Yahoo GC=F (fallback)
     try:
-        r      = requests.get(sources[1][0], params=sources[1][1],
-                              headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
+        import random
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
+            params={"interval": "1m", "range": "1d", "_": int(time.time())},
+            headers={
+                "User-Agent": f"Mozilla/5.0 (rv:{random.randint(100,120)}.0)",
+                "Cache-Control": "no-cache"
+            },
+            timeout=8
+        )
         raw    = r.json()
-        result = raw.get("chart",{}).get("result",[])
+        result = raw.get("chart", {}).get("result", [])
         if result:
             closes = result[0]["indicators"]["quote"][0]["close"]
             closes = [x for x in closes if x is not None]
-            if closes: return round(closes[-1], 2)
+            if closes:
+                return round(closes[-1], 2)
     except:
         pass
+
     return None
 
 def fetch_xauusd_price():
@@ -934,8 +945,11 @@ while True:
             continue
 
         # Giá realtime nhanh (Binance spot, ~50ms)
-        fresh_price = fetch_latest_price() or round(df['close'].iloc[-1], 2)
-        price       = round(df['close'].iloc[-1], 2)
+        fresh_price = fetch_latest_price()
+        if fresh_price is None or fresh_price == price:
+            # Nếu giá không đổi hoặc lỗi → dùng giá từ data cache
+            fresh_price = price
+        print(f"[{now_str}] Gia: {fresh_price} (cache: {price})")
 
         # ==========================================
         # [0] DEMO - Kiểm tra lệnh chờ → fill NGAY
