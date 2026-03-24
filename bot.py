@@ -892,7 +892,7 @@ last_health_time     = now_vn()
 last_demo_status_t   = now_vn() - timedelta(minutes=1)
 last_backtest_date   = None
 last_morning_date    = None
-HEALTH_INTERVAL      = 15 * 60
+HEALTH_INTERVAL      = 60 * 60  # health check mỗi 1 tiếng
 DEMO_STATUS_INTERVAL = 1 * 60
 BACKTEST_HOUR        = 20
 
