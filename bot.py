@@ -12,13 +12,17 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ==========================================
-# MINI HTTP SERVER - giữ Railway không sleep
+# 1. MINI HTTP SERVER - Giữ Railway không sleep
 # ==========================================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK - SMC Bot dang chay")
+    def do_HEAD(self):
+        """Quan trọng: Đáp ứng health check của Railway"""
+        self.send_response(200)
+        self.end_headers()
     def log_message(self, format, *args): pass
 
 def run_server():
@@ -29,20 +33,20 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ==========================================
-# CONFIG & BẢO MẬT (Railway Variables)
+# 2. CONFIG & BẢO MẬT (Lấy từ Railway Variables)
 # ==========================================
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
 BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 
-BINGX_URL = "https://open-api-vst.bingx.com" # Endpoint Demo VST
+BINGX_URL = "https://open-api-vst.bingx.com" # Cổng Demo VST
 SYMBOL    = "GOLD-USDT"
 INTERVAL  = os.environ.get("INTERVAL", "15m")
 RR        = float(os.environ.get("RR", "2.0"))
 
 # ==========================================
-# HELPERS & TELEGRAM
+# 3. HELPERS & TELEGRAM (Định nghĩa trước khi gọi)
 # ==========================================
 def now_vn():
     return datetime.utcnow() + timedelta(hours=7)
@@ -62,7 +66,7 @@ def send_telegram(msg):
         print(f"Telegram loi: {e}")
 
 # ==========================================
-# BINGX API CLIENT
+# 4. BINGX API CLIENT
 # ==========================================
 class BingXClient:
     def __init__(self, api_key, secret_key):
@@ -71,13 +75,10 @@ class BingXClient:
 
     def _get_signature(self, params):
         query_string = urllib.parse.urlencode(params)
-        return hmac.new(
-            self.secret_key.encode("utf-8"),
-            query_string.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
+        return hmac.new(self.secret_key.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
     def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
+        """Đặt lệnh Market trên BingX kèm TP/SL"""
         path = "/openApi/swap/v2/trade/order"
         params = {
             "symbol": SYMBOL,
@@ -101,6 +102,7 @@ class BingXClient:
             return None
 
     def get_vst_balance(self):
+        """Lấy số dư tài khoản ảo VST"""
         path = "/openApi/swap/v2/user/balance"
         params = {"timestamp": int(time.time() * 1000), "apiKey": self.api_key}
         params["signature"] = self._get_signature(params)
@@ -116,13 +118,13 @@ class BingXClient:
 bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
 # ==========================================
-# DATA FETCH & SMC LOGIC (Giữ nguyên từ bản gốc)
+# 5. DATA & SMC LOGIC (Giữ nguyên từ bản gốc)
 # ==========================================
 def fetch_data(interval="15m", candles=500):
     yf_map = {"1m":"1m","5m":"5m","15m":"15m","1h":"60m"}
     yf_interval = yf_map.get(interval, "15m")
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params = {"interval": yf_interval, "range": "60d", "events": "history"}
+    params  = {"interval": yf_interval, "range": "60d", "events": "history"}
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=15)
@@ -145,6 +147,7 @@ def fetch_latest_price():
         return round(float(r.json()["price"]), 2)
     except: return None
 
+# ... (Indicators: ema, rsi, atr, swing_highs, swing_lows, detect_structure, find_ob, v.v. giữ nguyên)
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 def rsi_calc(s, n=14):
     d = s.diff()
@@ -162,14 +165,16 @@ def add_indicators(df):
 def swing_highs(df, n=3):
     idx = []
     for i in range(n, len(df)-n):
-        if all(df['high'].iloc[i]>df['high'].iloc[i-j] for j in range(1,n+1)) and all(df['high'].iloc[i]>df['high'].iloc[i+j] for j in range(1,n+1)):
+        if all(df['high'].iloc[i]>df['high'].iloc[i-j] for j in range(1,n+1)) and \
+           all(df['high'].iloc[i]>df['high'].iloc[i+j] for j in range(1,n+1)):
             idx.append(i)
     return idx
 
 def swing_lows(df, n=3):
     idx = []
     for i in range(n, len(df)-n):
-        if all(df['low'].iloc[i]<df['low'].iloc[i-j] for j in range(1,n+1)) and all(df['low'].iloc[i]<df['low'].iloc[i+j] for j in range(1,n+1)):
+        if all(df['low'].iloc[i]<df['low'].iloc[i-j] for j in range(1,n+1)) and \
+           all(df['low'].iloc[i]<df['low'].iloc[i+j] for j in range(1,n+1)):
             idx.append(i)
     return idx
 
@@ -183,7 +188,6 @@ def detect_structure(df, sh, sl, i):
     return None
 
 def find_ob(df, sig, i, lookback=20):
-    atr = df['atr'].iloc[i]
     start = max(0, i-lookback)
     if sig == "BULL":
         for j in range(i-1, start-1, -1):
@@ -198,18 +202,6 @@ def find_ob(df, sig, i, lookback=20):
 def bull_confirm(df, i): return df['close'].iloc[i] > df['open'].iloc[i]
 def bear_confirm(df, i): return df['close'].iloc[i] < df['open'].iloc[i]
 
-def sltp_long(df, i, ob):
-    entry = ob['mid']
-    sl = ob['lo'] - df['atr'].iloc[i]*0.5
-    tp = entry + (entry-sl)*RR
-    return entry, sl, tp
-
-def sltp_short(df, i, ob):
-    entry = ob['mid']
-    sl = ob['hi'] + df['atr'].iloc[i]*0.5
-    tp = entry - (sl-entry)*RR
-    return entry, sl, tp
-
 def scan_signal(df):
     sh = swing_highs(df, n=3); sl = swing_lows(df, n=3)
     for i in range(len(df)-1, len(df)-5, -1):
@@ -217,12 +209,15 @@ def scan_signal(df):
         if sig:
             ob = find_ob(df, sig, i)
             if ob:
+                entry = ob['mid']
                 if sig == "BULL" and bull_confirm(df, i):
-                    e, s, t = sltp_long(df, i, ob)
-                    return {'side':'LONG', 'entry':e, 'sl':s, 'tp':t, 'candle_time':str(df['datetime'].iloc[i])}
+                    sl_val = ob['lo'] - df['atr'].iloc[i]*0.5
+                    tp_val = entry + (entry - sl_val) * RR
+                    return {'side':'LONG', 'entry':entry, 'sl':sl_val, 'tp':tp_val, 'candle_time':str(df['datetime'].iloc[i])}
                 if sig == "BEAR" and bear_confirm(df, i):
-                    e, s, t = sltp_short(df, i, ob)
-                    return {'side':'SHORT', 'entry':e, 'sl':s, 'tp':t, 'candle_time':str(df['datetime'].iloc[i])}
+                    sl_val = ob['hi'] + df['atr'].iloc[i]*0.5
+                    tp_val = entry - (sl_val - entry) * RR
+                    return {'side':'SHORT', 'entry':entry, 'sl':sl_val, 'tp':tp_val, 'candle_time':str(df['datetime'].iloc[i])}
     return None
 
 def format_signal_msg(signal, price, tf):
@@ -230,10 +225,10 @@ def format_signal_msg(signal, price, tf):
     return (f"{emoji} <b>TÍN HIỆU SMC - GOLD {tf}</b>\n\n"
             f"📌 Lệnh: <b>{signal['side']}</b>\n🎯 Vào: <b>{round(signal['entry'],2)}</b>\n"
             f"🛑 SL: <b>{round(signal['sl'],2)}</b>\n✅ TP: <b>{round(signal['tp'],2)}</b>\n"
-            f"<i>⏰ {now_vn().strftime('%H:%M')}</i>")
+            f"<i>⏰ {now_vn().strftime('%H:%M')} (GMT+7)</i>")
 
 # ==========================================
-# BACKGROUND FETCH
+# 6. BACKGROUND FETCH THREAD
 # ==========================================
 _df_cache = {"df": None}; _cache_lock = threading.Lock()
 def _bg_fetcher():
@@ -243,17 +238,18 @@ def _bg_fetcher():
             if df is not None:
                 df = add_indicators(df)
                 with _cache_lock: _df_cache["df"] = df
+                print(f"[BG] Updated | Close: {round(df['close'].iloc[-1],2)}")
         except: pass
         time.sleep(30)
 
 # ==========================================
-# MAIN EXECUTION
+# 7. MAIN EXECUTION LOOP
 # ==========================================
 bg_thread = threading.Thread(target=_bg_fetcher, daemon=True); bg_thread.start()
 time.sleep(5)
 
 print(f"Bot SMC BingX khoi dong | {INTERVAL}")
-send_telegram(f"🚀 <b>Bot SMC GOLD đã chuyển sang dùng BingX API (VST)</b>")
+send_telegram(f"🚀 <b>Bot SMC GOLD đã khởi động (Dùng BingX VST)</b>")
 
 last_signal_key = None
 last_health_time = now_vn()
@@ -270,25 +266,27 @@ while True:
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
+                # Bắn noti tín hiệu SMC
                 send_telegram(format_signal_msg(signal, fresh_price, INTERVAL))
                 last_signal_key = sig_key
 
-                # Thực thi lệnh BingX
+                # Thực thi lệnh trên sàn BingX
                 side = "BUY" if signal['side'] == 'LONG' else "SELL"
                 pos_side = signal['side']
                 order = bing_client.place_market_order(side, pos_side, 1, signal['tp'], signal['sl'])
                 
                 if order and order.get("code") == 0:
                     bal = bing_client.get_vst_balance()
-                    send_telegram(f"✅ <b>BINGX: Đã đặt lệnh {pos_side}</b>\n💰 VST: <b>{round(bal, 2)}</b>")
+                    send_telegram(f"✅ <b>BINGX: Đã đặt lệnh {pos_side}</b>\n💰 VST Balance: <b>{round(bal, 2)}</b>")
                 else:
-                    msg = order.get("msg", "Error") if order else "Conn Error"
+                    msg = order.get("msg", "Error") if order else "Connection Error"
                     send_telegram(f"❌ <b>BINGX LỖI:</b> <code>{msg}</code>")
 
+        # Health check mỗi tiếng 1 lần
         if (now_vn() - last_health_time).total_seconds() >= 3600:
-            send_telegram(f"🤖 <b>Bot SMC Live</b>\nGiá GOLD: {fresh_price}")
+            send_telegram(f"🤖 <b>Bot SMC vẫn đang chạy</b>\nGiá GOLD: {fresh_price}")
             last_health_time = now_vn()
 
         time.sleep(5)
     except Exception as e:
-        print(f"Loi: {e}"); time.sleep(10)
+        print(f"Loi Main Loop: {e}"); time.sleep(10)
