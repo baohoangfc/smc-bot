@@ -16,13 +16,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # ==========================================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
+        self.send_response(200); self.end_headers()
         self.wfile.write(b"OK - SMC Bot dang chay")
     def do_HEAD(self):
-        """Quan trọng: Đáp ứng health check của Railway"""
-        self.send_response(200)
-        self.end_headers()
+        self.send_response(200); self.end_headers()
     def log_message(self, format, *args): pass
 
 def run_server():
@@ -33,40 +30,35 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ==========================================
-# 2. CONFIG & BẢO MẬT (Lấy từ Railway Variables)
+# 2. CONFIG & BẢO MẬT
 # ==========================================
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
 BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 
-BINGX_URL = "https://open-api-vst.bingx.com" # Cổng Demo VST
+BINGX_URL = "https://open-api-vst.bingx.com" 
 SYMBOL    = "GOLD-USDT"
 INTERVAL  = os.environ.get("INTERVAL", "15m")
 RR        = float(os.environ.get("RR", "2.0"))
 
 # ==========================================
-# 3. HELPERS & TELEGRAM (Định nghĩa trước khi gọi)
+# 3. HELPERS & TELEGRAM
 # ==========================================
 def now_vn():
     return datetime.utcnow() + timedelta(hours=7)
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"[TELEGRAM] {msg[:80]}...")
-        return
+        print(f"[TELEGRAM] {msg[:80]}..."); return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg,
-            "parse_mode": "HTML"
-        }, timeout=10)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
     except Exception as e:
         print(f"Telegram loi: {e}")
 
 # ==========================================
-# 4. BINGX API CLIENT (Fix Signature & Headers)
+# 4. BINGX API CLIENT (SỬA LỖI CHỮ KÝ)
 # ==========================================
 class BingXClient:
     def __init__(self, api_key, secret_key):
@@ -74,8 +66,8 @@ class BingXClient:
         self.secret_key = secret_key
 
     def _get_signature(self, params):
-        """Ký xác thực: Sắp xếp tham số A-Z để khớp chuẩn sàn"""
-        # Sắp xếp các key theo bảng chữ cái
+        """Ký xác thực: KHÔNG bao gồm apiKey trong chuỗi này"""
+        # Sắp xếp tham số theo bảng chữ cái A-Z
         sorted_params = dict(sorted(params.items()))
         query_string = urllib.parse.urlencode(sorted_params)
         return hmac.new(self.secret_key.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -83,7 +75,7 @@ class BingXClient:
     def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
         path = "/openApi/swap/v2/trade/order"
         
-        # Tham số bắt buộc bao gồm cả apiKey trong chuỗi ký
+        # apiKey KHÔNG được để trong params này để tránh lỗi Signature
         params = {
             "symbol": SYMBOL,
             "side": side,
@@ -91,37 +83,29 @@ class BingXClient:
             "type": "MARKET",
             "quantity": quantity,
             "timestamp": int(time.time() * 1000),
-            "apiKey": self.api_key,
-            "recvWindow": 5000 # Chống lỗi lệch thời gian giữa server bot và sàn
+            "recvWindow": 5000
         }
         
-        # Sử dụng separators để loại bỏ khoảng trắng thừa trong JSON
         if tp: params["takeProfit"] = json.dumps({"type": "MARKET", "stopPrice": tp, "price": tp}, separators=(',', ':'))
         if sl: params["stopLoss"] = json.dumps({"type": "MARKET", "stopPrice": sl, "price": sl}, separators=(',', ':'))
         
         params["signature"] = self._get_signature(params)
         
-        # Header bắt buộc X-BX-APIKEY
+        # Header bắt buộc chứa API Key
         headers = {
             "X-BX-APIKEY": self.api_key,
             "Content-Type": "application/x-www-form-urlencoded"
         }
         
         try:
-            url = f"{BINGX_URL}{path}"
-            r = requests.post(url, params=params, headers=headers, timeout=15)
+            r = requests.post(f"{BINGX_URL}{path}", params=params, headers=headers, timeout=15)
             return r.json()
         except Exception as e:
-            print(f"BingX loi: {e}")
-            return None
+            print(f"BingX loi: {e}"); return None
 
     def get_vst_balance(self):
         path = "/openApi/swap/v2/user/balance"
-        params = {
-            "timestamp": int(time.time() * 1000),
-            "apiKey": self.api_key,
-            "recvWindow": 5000
-        }
+        params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
         params["signature"] = self._get_signature(params)
         headers = {"X-BX-APIKEY": self.api_key}
         try:
@@ -142,7 +126,7 @@ def fetch_data(interval="15m", candles=500):
     yf_map = {"1m":"1m","5m":"5m","15m":"15m","1h":"60m"}
     yf_interval = yf_map.get(interval, "15m")
     url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params  = {"interval": yf_interval, "range": "60d", "events": "history"}
+    params = {"interval": yf_interval, "range": "60d", "events": "history"}
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=15)
@@ -165,7 +149,7 @@ def fetch_latest_price():
         return round(float(r.json()["price"]), 2)
     except: return None
 
-# ... (Indicators: ema, rsi, atr, swing logic giữ nguyên)
+# ... (Indicators, Swing logic, Scan logic giữ nguyên)
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 def rsi_calc(s, n=14):
     d = s.diff()
@@ -174,32 +158,27 @@ def rsi_calc(s, n=14):
     return 100 - (100 / (1 + g/l))
 
 def add_indicators(df):
-    df['ema200'] = ema(df['close'], 200)
-    df['rsi']    = rsi_calc(df['close'], 14)
-    df['tr']     = np.maximum(df['high']-df['low'], np.maximum(abs(df['high']-df['close'].shift(1)), abs(df['low'] -df['close'].shift(1))))
-    df['atr']    = df['tr'].ewm(span=14, adjust=False).mean()
+    df['ema200'] = ema(df['close'], 200); df['rsi'] = rsi_calc(df['close'], 14)
+    df['tr'] = np.maximum(df['high']-df['low'], np.maximum(abs(df['high']-df['close'].shift(1)), abs(df['low'] -df['close'].shift(1))))
+    df['atr'] = df['tr'].ewm(span=14, adjust=False).mean()
     return df
 
 def swing_highs(df, n=3):
     idx = []
     for i in range(n, len(df)-n):
-        if all(df['high'].iloc[i]>df['high'].iloc[i-j] for j in range(1,n+1)) and \
-           all(df['high'].iloc[i]>df['high'].iloc[i+j] for j in range(1,n+1)):
+        if all(df['high'].iloc[i]>df['high'].iloc[i-j] for j in range(1,n+1)) and all(df['high'].iloc[i]>df['high'].iloc[i+j] for j in range(1,n+1)):
             idx.append(i)
     return idx
 
 def swing_lows(df, n=3):
     idx = []
     for i in range(n, len(df)-n):
-        if all(df['low'].iloc[i]<df['low'].iloc[i-j] for j in range(1,n+1)) and \
-           all(df['low'].iloc[i]<df['low'].iloc[i+j] for j in range(1,n+1)):
+        if all(df['low'].iloc[i]<df['low'].iloc[i-j] for j in range(1,n+1)) and all(df['low'].iloc[i]<df['low'].iloc[i+j] for j in range(1,n+1)):
             idx.append(i)
     return idx
 
 def detect_structure(df, sh, sl, i):
-    c = df['close'].iloc[i]
-    psh = [h for h in sh if h < i-1]
-    psl = [l for l in sl if l < i-1]
+    c = df['close'].iloc[i]; psh = [h for h in sh if h < i-1]; psl = [l for l in sl if l < i-1]
     if not psh or not psl: return None
     if c > df['high'].iloc[max(psh)]: return "BULL"
     if c < df['low'].iloc[max(psl)]:  return "BEAR"
@@ -229,13 +208,13 @@ def scan_signal(df):
             if ob:
                 entry = ob['mid']
                 if sig == "BULL" and bull_confirm(df, i):
-                    sl_val = ob['lo'] - df['atr'].iloc[i]*0.5
-                    tp_val = entry + (entry - sl_val) * RR
-                    return {'side':'LONG', 'entry':entry, 'sl':sl_val, 'tp':tp_val, 'candle_time':str(df['datetime'].iloc[i])}
+                    sl_v = ob['lo'] - df['atr'].iloc[i]*0.5
+                    tp_v = entry + (entry-sl_v)*RR
+                    return {'side':'LONG', 'entry':entry, 'sl':sl_v, 'tp':tp_v, 'candle_time':str(df['datetime'].iloc[i])}
                 if sig == "BEAR" and bear_confirm(df, i):
-                    sl_val = ob['hi'] + df['atr'].iloc[i]*0.5
-                    tp_val = entry - (sl_val - entry) * RR
-                    return {'side':'SHORT', 'entry':entry, 'sl':sl_val, 'tp':tp_val, 'candle_time':str(df['datetime'].iloc[i])}
+                    sl_v = ob['hi'] + df['atr'].iloc[i]*0.5
+                    tp_v = entry - (sl_v-entry)*RR
+                    return {'side':'SHORT', 'entry':entry, 'sl':sl_v, 'tp':tp_v, 'candle_time':str(df['datetime'].iloc[i])}
     return None
 
 def format_signal_msg(signal, price, tf):
@@ -254,7 +233,7 @@ def _bg_fetcher():
         try:
             df = fetch_data(INTERVAL)
             if df is not None:
-                df = add_indicators(df)
+                df = add_indicators(df); 
                 with _cache_lock: _df_cache["df"] = df
         except: pass
         time.sleep(30)
@@ -265,17 +244,16 @@ def _bg_fetcher():
 bg_thread = threading.Thread(target=_bg_fetcher, daemon=True); bg_thread.start()
 time.sleep(5)
 
-print(f"Bot SMC BingX khoi dong | {INTERVAL}")
-send_telegram(f"🚀 <b>Bot SMC GOLD đã khởi động (Dùng BingX VST)</b>")
+# Báo cáo số dư khi khởi động
+vst_bal = bing_client.get_vst_balance()
+send_telegram(f"🚀 <b>Bot SMC GOLD Khởi động</b>\n💰 Tài khoản: <b>BingX VST</b>\n💵 Số dư: <b>{round(vst_bal, 2)} VST</b>")
 
-last_signal_key = None
-last_health_time = now_vn()
+last_signal_key = None; last_health_time = now_vn()
 
 while True:
     try:
         with _cache_lock: df = _df_cache["df"]
-        if df is None:
-            time.sleep(3); continue
+        if df is None: time.sleep(3); continue
 
         fresh_price = fetch_latest_price() or round(df['close'].iloc[-1], 2)
         signal = scan_signal(df)
@@ -286,25 +264,21 @@ while True:
                 send_telegram(format_signal_msg(signal, fresh_price, INTERVAL))
                 last_signal_key = sig_key
 
-                # Thực thi lệnh trên sàn BingX (VST)
+                # Đặt lệnh trên sàn BingX
                 side = "BUY" if signal['side'] == 'LONG' else "SELL"
                 pos_side = signal['side']
-                
-                # Quantity mặc định là 1 (Vàng thường yêu cầu bước nhảy tối thiểu)
                 order = bing_client.place_market_order(side, pos_side, 1, signal['tp'], signal['sl'])
                 
                 if order and order.get("code") == 0:
                     bal = bing_client.get_vst_balance()
-                    send_telegram(f"✅ <b>BINGX: Đã đặt lệnh {pos_side}</b>\n💰 VST Balance: <b>{round(bal, 2)}</b>")
+                    send_telegram(f"✅ <b>BINGX: Đã đặt lệnh {pos_side}</b>\n💰 Số dư: <b>{round(bal, 2)} VST</b>")
                 else:
-                    msg = order.get("msg", "Error") if order else "Connection Error"
+                    msg = order.get("msg", "Error") if order else "Conn Error"
                     send_telegram(f"❌ <b>BINGX LỖI:</b> <code>{msg}</code>")
 
-        # Health check mỗi tiếng 1 lần để giữ bot sống trên Railway
         if (now_vn() - last_health_time).total_seconds() >= 3600:
-            send_telegram(f"🤖 <b>Bot SMC vẫn đang chạy</b>\nGiá GOLD: {fresh_price}")
+            send_telegram(f"🤖 <b>Bot SMC Live</b>\nGiá GOLD: {fresh_price}\nSố dư: {round(bing_client.get_vst_balance(), 2)} VST")
             last_health_time = now_vn()
-
         time.sleep(5)
     except Exception as e:
-        print(f"Loi Main Loop: {e}"); time.sleep(10)
+        print(f"Loi: {e}"); time.sleep(10)
