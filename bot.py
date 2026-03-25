@@ -41,7 +41,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
 BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 BINGX_URL        = "https://open-api-vst.bingx.com"
-SYMBOL           = "GOLD-USDT"
+SYMBOL           = os.environ.get("BINGX_SYMBOL", "NCCOGOLD2USD-USDT")
 INTERVAL         = os.environ.get("INTERVAL", "15m")
 RR               = float(os.environ.get("RR", "2.0"))
 
@@ -207,7 +207,7 @@ def format_signal_msg(signal):
     side_text = "MUA (LONG)" if signal["side"] == "LONG" else "BÁN (SHORT)"
     rr_text = f"1:{RR:.1f}"
     return (
-        f"{emoji} <b>TÍN HIỆU SMC - GOLD {INTERVAL}</b>\n\n"
+        f"{emoji} <b>TÍN HIỆU SMC - {SYMBOL} {INTERVAL}</b>\n\n"
         f"📌 Lệnh      : <b>{side_text}</b>\n"
         f"💰 Giá hiện tại : <b>{format_price(signal['entry'])}</b>\n"
         f"🎯 Vào lệnh  : <b>{format_price(signal['entry'])}</b>\n"
