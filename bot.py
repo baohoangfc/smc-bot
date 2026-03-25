@@ -46,6 +46,7 @@ INTERVAL         = os.environ.get("INTERVAL", "15m")
 RR               = float(os.environ.get("RR", "2.0"))
 ORDER_NOTIONAL_USDT = float(os.environ.get("ORDER_NOTIONAL_USDT", "1000"))
 LEVERAGE = int(os.environ.get("LEVERAGE", "100"))
+MAX_ACTIVE_ORDERS = int(os.environ.get("MAX_ACTIVE_ORDERS", "3"))
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -495,12 +496,14 @@ def format_startup_msg(vst_balance):
         f"🕒 Thời gian: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
 
-def format_signal_msg(signal):
+def format_signal_msg(signal, order_label=None):
     emoji = "🟢" if signal["side"] == "LONG" else "🔴"
     side_text = "MUA (LONG)" if signal["side"] == "LONG" else "BÁN (SHORT)"
     rr_text = f"1:{RR:.1f}"
+    order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     return (
         f"{emoji} <b>TÍN HIỆU SMC - {SYMBOL} {INTERVAL}</b>\n\n"
+        f"{order_line}"
         f"📌 Lệnh      : <b>{side_text}</b>\n"
         f"💰 Giá hiện tại : <b>{format_price(signal['entry'])}</b>\n"
         f"🎯 Vào lệnh  : <b>{format_price(signal['entry'])}</b>\n"
@@ -524,10 +527,12 @@ def format_status_msg(last_price, candle_time):
         f"Cập nhật tiếp theo lúc <b>{format_vn_time(next_time, '%H:%M')}</b>"
     )
 
-def format_order_result_msg(signal, order_result):
+def format_order_result_msg(signal, order_result, order_label=None):
     order_id = (order_result or {}).get("data", {}).get("order", {}).get("orderId", "N/A")
+    order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     return (
         "🟢 <b>DEMO - Đặt lệnh thị trường</b>\n\n"
+        f"{order_line}"
         f"📌 Lệnh     : <b>{'MUA (LONG)' if signal['side'] == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry    : <b>{format_price(signal['entry'])}</b>\n"
         f"🛑 Cắt lỗ   : <b>{format_price(signal['sl'])}</b>\n"
@@ -564,8 +569,10 @@ def format_pnl_msg(position, last_price):
     price_to_show = position.get("markPrice") or last_price
     tp_text = format_price(position.get("tp")) if position.get("tp") is not None else "Chưa có"
     sl_text = format_price(position.get("sl")) if position.get("sl") is not None else "Chưa có"
+    order_label = position.get("label", "LỆNH")
     return (
         f"{pnl_emoji} <b>Theo dõi lệnh mỗi 1 phút</b>\n\n"
+        f"🆔 Mã lệnh  : <b>{order_label}</b>\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
         f"🛑 Cắt lỗ    : <b>{sl_text}</b>\n"
@@ -575,6 +582,41 @@ def format_pnl_msg(position, last_price):
         f"💵 PnL tạm tính: <b>{pnl:+.2f} USDT ({pnl_pct:+.2f}%)</b>\n"
         f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
+
+def calc_live_pnl(position, last_price):
+    side = position.get("side")
+    qty = float(position.get("quantity", 0) or 0)
+    entry = float(position.get("entry", 0) or 0)
+    if side == "LONG":
+        return (last_price - entry) * qty
+    return (entry - last_price) * qty
+
+def decide_positions_to_close(active_positions, incoming_side, live_price):
+    if not active_positions:
+        return []
+
+    removable = []
+    opposite_positions = [p for p in active_positions if p.get("side") != incoming_side]
+    if opposite_positions:
+        worst_opposite = min(opposite_positions, key=lambda p: calc_live_pnl(p, live_price))
+        removable.append(worst_opposite)
+
+    remaining = len(active_positions) - len(removable)
+    if remaining >= MAX_ACTIVE_ORDERS:
+        candidates = [p for p in active_positions if p not in removable]
+        if candidates:
+            worst_any = min(candidates, key=lambda p: calc_live_pnl(p, live_price))
+            removable.append(worst_any)
+
+    uniq = []
+    seen = set()
+    for pos in removable:
+        label = pos.get("label")
+        if label in seen:
+            continue
+        seen.add(label)
+        uniq.append(pos)
+    return uniq
 
 # ==========================================
 # 4. BACKGROUND FETCH & MAIN LOOP
@@ -595,8 +637,14 @@ threading.Thread(target=_bg_fetcher, daemon=True).start()
 time.sleep(10) # Đợi dữ liệu lần đầu
 
 vst_bal = bing_client.get_vst_balance()
-active_position = bing_client.get_open_position()
-if not active_position:
+existing_position = bing_client.get_open_position()
+active_positions = []
+order_seq = 0
+if existing_position:
+    order_seq += 1
+    existing_position["label"] = f"LỆNH #{order_seq}"
+    active_positions.append(existing_position)
+if not active_positions:
     bing_client.set_leverage("LONG", LEVERAGE)
     bing_client.set_leverage("SHORT", LEVERAGE)
 send_telegram(format_startup_msg(vst_bal))
@@ -626,13 +674,24 @@ while True:
                 time.sleep(10)
                 continue
             if sig_key != last_signal_key:
-                # Nếu còn vị thế mở, không vào thêm lệnh để tránh đóng/mở chồng khi khởi động lại.
-                if active_position:
-                    print("[INFO] Đang có vị thế mở, bỏ qua tín hiệu mới.")
+                removable_positions = decide_positions_to_close(active_positions, signal["side"], float(live_price))
+                for pos in removable_positions:
+                    active_positions = [x for x in active_positions if x.get("label") != pos.get("label")]
+                    pnl_snapshot = calc_live_pnl(pos, float(live_price))
+                    send_telegram(
+                        "🔄 <b>Điều chỉnh danh mục lệnh</b>\n"
+                        f"Đóng theo phân tích: <b>{pos.get('label')}</b> ({pos.get('side')})\n"
+                        f"PnL tạm tính khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>\n"
+                        f"Lý do: ưu tiên tín hiệu mới {signal['side']} và giữ tối đa {MAX_ACTIVE_ORDERS} lệnh."
+                    )
+                if len(active_positions) >= MAX_ACTIVE_ORDERS:
+                    print("[INFO] Đã đạt tối đa số lệnh giữ, bỏ qua tín hiệu mới.")
                     last_signal_key = sig_key
                     time.sleep(10)
                     continue
-                send_telegram(format_signal_msg(signal))
+                order_seq += 1
+                order_label = f"LỆNH #{order_seq}"
+                send_telegram(format_signal_msg(signal, order_label))
                 last_signal_key = sig_key
                 # Đặt lệnh
                 last_price = float(live_price)
@@ -643,7 +702,7 @@ while True:
                 quantity = calc_order_quantity(last_price, ORDER_NOTIONAL_USDT)
                 order = bing_client.place_market_order("BUY" if signal['side']=='LONG' else "SELL", 
                                                        signal['side'], quantity, order_signal['tp'], order_signal['sl'])
-                send_telegram(format_order_result_msg(order_signal, order))
+                send_telegram(format_order_result_msg(order_signal, order, order_label))
                 print(f"Order Result: {order}")
                 if order and order.get("code") == 0:
                     fill_price = extract_order_avg_price(order, last_price)
@@ -668,37 +727,52 @@ while True:
                                 f"SL thêm mới: <b>{'Có' if protection_result.get('sl_added') else 'Không'}</b>"
                             )
 
-                    active_position = {
+                    active_positions.append({
+                        "label": order_label,
                         "side": signal["side"],
                         "entry": fill_price,
                         "quantity": float(quantity),
                         "tp": exchange_pos.get("tp") if exchange_pos and exchange_pos.get("tp") is not None else order_signal.get("tp"),
                         "sl": exchange_pos.get("sl") if exchange_pos and exchange_pos.get("sl") is not None else order_signal.get("sl"),
                         "opened_at": now_vn()
-                    }
+                    })
                     last_pnl_notify_ts = 0
         elif candle_time != last_status_candle:
             send_telegram(format_status_msg(live_price, candle_time))
             last_status_candle = candle_time
 
-        # Nếu đã vào lệnh, gửi noti lời/lỗ mỗi 1 phút.
-        if active_position:
+        # Nếu đã vào lệnh, gửi noti lời/lỗ mỗi 1 phút cho từng lệnh.
+        if active_positions:
             now_ts = time.time()
             if now_ts - last_pnl_notify_ts >= 60:
-                # Đồng bộ lại trạng thái vị thế từ sàn (đề phòng đã đóng do TP/SL).
                 exchange_pos = bing_client.get_open_position()
                 if not exchange_pos:
-                    send_telegram("✅ <b>Vị thế đã đóng trên BingX</b>\nDừng theo dõi PnL cho lệnh trước.")
-                    active_position = None
+                    send_telegram("✅ <b>Không còn vị thế mở trên BingX</b>\nXóa danh sách lệnh đang theo dõi.")
+                    active_positions = []
                     last_pnl_notify_ts = now_ts
                     time.sleep(10)
                     continue
-                if exchange_pos.get("tp") is None:
-                    exchange_pos["tp"] = active_position.get("tp")
-                if exchange_pos.get("sl") is None:
-                    exchange_pos["sl"] = active_position.get("sl")
-                active_position = exchange_pos
-                send_telegram(format_pnl_msg(active_position, float(live_price)))
+
+                for pos in list(active_positions):
+                    if pos.get("tp") is not None:
+                        if pos["side"] == "LONG" and float(live_price) >= float(pos["tp"]):
+                            send_telegram(f"🏁 <b>{pos.get('label')} đã chạm TP</b>")
+                            active_positions.remove(pos)
+                            continue
+                        if pos["side"] == "SHORT" and float(live_price) <= float(pos["tp"]):
+                            send_telegram(f"🏁 <b>{pos.get('label')} đã chạm TP</b>")
+                            active_positions.remove(pos)
+                            continue
+                    if pos.get("sl") is not None:
+                        if pos["side"] == "LONG" and float(live_price) <= float(pos["sl"]):
+                            send_telegram(f"🛑 <b>{pos.get('label')} đã chạm SL</b>")
+                            active_positions.remove(pos)
+                            continue
+                        if pos["side"] == "SHORT" and float(live_price) >= float(pos["sl"]):
+                            send_telegram(f"🛑 <b>{pos.get('label')} đã chạm SL</b>")
+                            active_positions.remove(pos)
+                            continue
+                    send_telegram(format_pnl_msg(pos, float(live_price)))
                 last_pnl_notify_ts = now_ts
 
         time.sleep(10)
