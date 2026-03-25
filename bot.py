@@ -341,58 +341,118 @@ class BingXClient:
             print(f"[WARN] set_leverage {side} exception: {e}")
             return None
 
-    def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
-        path = "/openApi/swap/v2/trade/order"
-        params = {
-            "symbol": SYMBOL, "side": side, "positionSide": pos_side,
-            "type": "MARKET", "quantity": quantity,
-            "timestamp": int(time.time() * 1000), "recvWindow": 5000
+    def _build_entry_order_params(self, side, pos_side, quantity, order_type="MARKET", price=None, tp=None, sl=None):
+        req = {
+            "symbol": SYMBOL,
+            "side": side,
+            "positionSide": pos_side,
+            "type": order_type,
+            "quantity": quantity,
+            "timestamp": int(time.time() * 1000),
+            "recvWindow": 5000
         }
+        if order_type == "LIMIT" and price is not None:
+            req["price"] = price
+            req["timeInForce"] = "GTC"
         if tp is not None:
-            params["takeProfit"] = json.dumps(
+            req["takeProfit"] = json.dumps(
                 {"type": "TAKE_PROFIT_MARKET", "stopPrice": tp, "price": tp},
                 separators=(",", ":")
             )
         if sl is not None:
-            params["stopLoss"] = json.dumps(
+            req["stopLoss"] = json.dumps(
                 {"type": "STOP_MARKET", "stopPrice": sl, "price": sl},
                 separators=(",", ":")
             )
+        return req
 
-        def _extract_code(resp):
-            try:
-                return int(resp.get("code"))
-            except Exception:
-                return None
+    def _extract_code(self, resp):
+        try:
+            return int(resp.get("code"))
+        except Exception:
+            return None
+
+    def place_order(self, side, pos_side, quantity, order_type="MARKET", price=None, tp=None, sl=None):
+        path = "/openApi/swap/v2/trade/order"
 
         try:
+            params = self._build_entry_order_params(side, pos_side, quantity, order_type, price, tp, sl)
             data = self._signed_request("POST", path, params, timeout=15)
-
-            if _extract_code(data) != 0 and (tp is not None or sl is not None):
-                print(f"[WARN] Đặt lệnh kèm TP/SL lỗi, thử lại không kèm TP/SL: {data}")
-                params = {
-                    "symbol": SYMBOL, "side": side, "positionSide": pos_side,
-                    "type": "MARKET", "quantity": quantity,
-                    "timestamp": int(time.time() * 1000), "recvWindow": 5000
-                }
-                data = self._signed_request("POST", path, params, timeout=15)
 
             # Nếu thiếu margin, giảm dần khối lượng và thử lại.
             cur_qty = float(quantity)
-            while _extract_code(data) == 101204 and cur_qty > 0.001:
+            while self._extract_code(data) == 101204 and cur_qty > 0.001:
                 cur_qty = round(cur_qty / 2, 4)
-                retry_params = {
-                    "symbol": SYMBOL, "side": side, "positionSide": pos_side,
-                    "type": "MARKET", "quantity": cur_qty,
-                    "timestamp": int(time.time() * 1000), "recvWindow": 5000
-                }
+                retry_params = self._build_entry_order_params(side, pos_side, cur_qty, order_type, price, tp, sl)
                 print(f"[WARN] Insufficient margin, thử lại quantity={cur_qty}")
                 data = self._signed_request("POST", path, retry_params, timeout=15)
 
             return data
         except Exception as e:
-            print(f"[ERROR] place_market_order exception: {e}")
+            print(f"[ERROR] place_order exception: {e}")
             return None
+
+    def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
+        return self.place_order(side, pos_side, quantity, "MARKET", None, tp, sl)
+
+    def place_limit_order(self, side, pos_side, quantity, price, tp=None, sl=None):
+        return self.place_order(side, pos_side, quantity, "LIMIT", price, tp, sl)
+
+    def add_missing_tp_sl(self, pos_side, tp=None, sl=None):
+        """
+        Nếu vị thế hiện tại chưa có TP/SL trên sàn thì đặt bổ sung ngay.
+        """
+        try:
+            if tp is None and sl is None:
+                return {"tp_added": False, "sl_added": False, "position": self.get_open_position()}
+
+            position = self.get_open_position()
+            if not position or position.get("side") != pos_side:
+                return {"tp_added": False, "sl_added": False, "position": position}
+
+            close_side = "SELL" if pos_side == "LONG" else "BUY"
+            path = "/openApi/swap/v2/trade/order"
+            result = {"tp_added": False, "sl_added": False, "position": position}
+
+            if position.get("tp") is None and tp is not None:
+                tp_params = {
+                    "symbol": SYMBOL,
+                    "side": close_side,
+                    "positionSide": pos_side,
+                    "type": "TAKE_PROFIT_MARKET",
+                    "stopPrice": tp,
+                    "price": tp,
+                    "closePosition": True,
+                    "timestamp": int(time.time() * 1000),
+                    "recvWindow": 5000
+                }
+                tp_resp = self._signed_request("POST", path, tp_params, timeout=10)
+                result["tp_added"] = self._extract_code(tp_resp) == 0
+                if not result["tp_added"]:
+                    print(f"[WARN] Add TP thất bại: {tp_resp}")
+
+            if position.get("sl") is None and sl is not None:
+                sl_params = {
+                    "symbol": SYMBOL,
+                    "side": close_side,
+                    "positionSide": pos_side,
+                    "type": "STOP_MARKET",
+                    "stopPrice": sl,
+                    "price": sl,
+                    "closePosition": True,
+                    "timestamp": int(time.time() * 1000),
+                    "recvWindow": 5000
+                }
+                sl_resp = self._signed_request("POST", path, sl_params, timeout=10)
+                result["sl_added"] = self._extract_code(sl_resp) == 0
+                if not result["sl_added"]:
+                    print(f"[WARN] Add SL thất bại: {sl_resp}")
+
+            result["position"] = self.get_open_position()
+            return result
+        except Exception as e:
+            print(f"[WARN] add_missing_tp_sl exception: {e}")
+            return {"tp_added": False, "sl_added": False, "position": self.get_open_position()}
 
 bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
@@ -587,12 +647,33 @@ while True:
                 print(f"Order Result: {order}")
                 if order and order.get("code") == 0:
                     fill_price = extract_order_avg_price(order, last_price)
+                    protection_result = bing_client.add_missing_tp_sl(
+                        signal["side"], order_signal.get("tp"), order_signal.get("sl")
+                    )
+                    exchange_pos = (protection_result or {}).get("position")
+                    if exchange_pos:
+                        has_tp = exchange_pos.get("tp") is not None
+                        has_sl = exchange_pos.get("sl") is not None
+                        if not (has_tp and has_sl):
+                            send_telegram(
+                                "⚠️ <b>Cảnh báo:</b> Lệnh đã khớp nhưng chưa thấy đủ TP/SL trên sàn.\n"
+                                f"TP: <b>{'Có' if has_tp else 'Thiếu'}</b> | "
+                                f"SL: <b>{'Có' if has_sl else 'Thiếu'}</b>\n"
+                                "Vui lòng kiểm tra lại trên BingX."
+                            )
+                        elif protection_result.get("tp_added") or protection_result.get("sl_added"):
+                            send_telegram(
+                                "🛡️ <b>Đã bổ sung TP/SL sau khi vào lệnh</b>\n"
+                                f"TP thêm mới: <b>{'Có' if protection_result.get('tp_added') else 'Không'}</b> | "
+                                f"SL thêm mới: <b>{'Có' if protection_result.get('sl_added') else 'Không'}</b>"
+                            )
+
                     active_position = {
                         "side": signal["side"],
                         "entry": fill_price,
                         "quantity": float(quantity),
-                        "tp": order_signal.get("tp"),
-                        "sl": order_signal.get("sl"),
+                        "tp": exchange_pos.get("tp") if exchange_pos and exchange_pos.get("tp") is not None else order_signal.get("tp"),
+                        "sl": exchange_pos.get("sl") if exchange_pos and exchange_pos.get("sl") is not None else order_signal.get("sl"),
                         "opened_at": now_vn()
                     }
                     last_pnl_notify_ts = 0
