@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import time
 import os
+import json
 import hmac
 import hashlib
 from datetime import datetime, timedelta
@@ -45,6 +46,19 @@ INTERVAL         = os.environ.get("INTERVAL", "15m")
 RR               = float(os.environ.get("RR", "2.0"))
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
+
+def format_price(value):
+    if value is None:
+        return "N/A"
+    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+def format_vn_time(dt_value, fmt="%d/%m/%Y %H:%M"):
+    dt = pd.to_datetime(dt_value)
+    return dt.strftime(fmt)
+
+def interval_to_minutes(interval):
+    mapping = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
+    return mapping.get(interval, 15)
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
@@ -113,11 +127,27 @@ class BingXClient:
             "type": "MARKET", "quantity": quantity,
             "timestamp": int(time.time() * 1000), "recvWindow": 5000
         }
-        if tp or sl:
-            print("[INFO] Bỏ qua TP/SL trong lệnh MARKET để tránh lỗi chữ ký; nên đặt TP/SL bằng endpoint điều kiện riêng sau khi khớp lệnh.")
+        if tp is not None:
+            params["takeProfit"] = json.dumps(
+                {"type": "MARKET", "stopPrice": tp, "price": tp},
+                separators=(",", ":")
+            )
+        if sl is not None:
+            params["stopLoss"] = json.dumps(
+                {"type": "MARKET", "stopPrice": sl, "price": sl},
+                separators=(",", ":")
+            )
 
         try:
             data = self._signed_request("POST", path, params, timeout=15)
+            if data.get("code") != 0 and (tp is not None or sl is not None):
+                print(f"[WARN] Đặt lệnh kèm TP/SL lỗi, thử lại không kèm TP/SL: {data}")
+                fallback = {
+                    "symbol": SYMBOL, "side": side, "positionSide": pos_side,
+                    "type": "MARKET", "quantity": quantity,
+                    "timestamp": int(time.time() * 1000), "recvWindow": 5000
+                }
+                data = self._signed_request("POST", path, fallback, timeout=15)
             return data
         except: return None
 
@@ -148,13 +178,71 @@ def add_indicators(df):
     return df
 
 def scan_signal(df):
-    # Logic SMC đơn giản hóa để ví dụ
-    if len(df) < 5: return None
-    last = df.iloc[-1]
-    if last['close'] > df['ema200'].iloc[-1]: # Giả định tín hiệu Long đơn giản
-        e = last['close']
-        return {'side':'LONG', 'entry':e, 'sl':e-2, 'tp':e+4, 'candle_time':str(last['datetime'])}
+    # Chỉ dùng nến đã đóng để tránh spam noti khi nến hiện tại còn chạy.
+    if len(df) < 6: return None
+    last_closed = df.iloc[-2]
+    if last_closed['close'] > df['ema200'].iloc[-2]: # Giả định tín hiệu Long đơn giản
+        e = round(float(last_closed['close']), 2)
+        return {
+            'side': 'LONG',
+            'entry': e,
+            'sl': round(e - 2, 2),
+            'tp': round(e + 4, 2),
+            'candle_time': str(last_closed['datetime'])
+        }
     return None
+
+def get_vst_balance_text():
+    return f"{bing_client.get_vst_balance():.4f} VST"
+
+def format_startup_msg(vst_balance):
+    return (
+        "🚀 <b>SMC Bot đã khởi động</b>\n"
+        f"💵 Số dư: <b>{vst_balance:.4f} VST</b>\n"
+        f"🕒 Thời gian: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
+    )
+
+def format_signal_msg(signal):
+    emoji = "🟢" if signal["side"] == "LONG" else "🔴"
+    side_text = "MUA (LONG)" if signal["side"] == "LONG" else "BÁN (SHORT)"
+    rr_text = f"1:{RR:.1f}"
+    return (
+        f"{emoji} <b>TÍN HIỆU SMC - GOLD {INTERVAL}</b>\n\n"
+        f"📌 Lệnh      : <b>{side_text}</b>\n"
+        f"💰 Giá hiện tại : <b>{format_price(signal['entry'])}</b>\n"
+        f"🎯 Vào lệnh  : <b>{format_price(signal['entry'])}</b>\n"
+        f"🛑 Cắt lỗ    : <b>{format_price(signal['sl'])}</b>\n"
+        f"✅ Chốt lời  : <b>{format_price(signal['tp'])}</b>\n"
+        f"📊 R:R       : <b>{rr_text}</b>\n\n"
+        f"💵 Số dư VST : <b>{get_vst_balance_text()}</b>\n"
+        f"⏰ <b>{format_vn_time(signal['candle_time'])} (GMT+7)</b>\n"
+        "⚠️ <i>Chỉ tham khảo, tự xác nhận trước khi vào lệnh</i>"
+    )
+
+def format_status_msg(last_price, candle_time):
+    next_time = pd.to_datetime(candle_time) + timedelta(minutes=interval_to_minutes(INTERVAL))
+    return (
+        f"🤖 <b>SMC Bot - Cập nhật {format_vn_time(candle_time, '%H:%M')} (GMT+7)</b>\n\n"
+        f"Giá XAUUSDT : <b>{format_price(last_price)}</b>\n"
+        f"Khung TG    : <b>{INTERVAL}</b>\n"
+        f"Số dư VST   : <b>{get_vst_balance_text()}</b>\n"
+        "Trạng thái  : ✅ <b>Đang chạy</b>\n\n"
+        "⏳ Chưa có tín hiệu. Đang theo dõi...\n\n"
+        f"Cập nhật tiếp theo lúc <b>{format_vn_time(next_time, '%H:%M')}</b>"
+    )
+
+def format_order_result_msg(signal, order_result):
+    order_id = (order_result or {}).get("data", {}).get("order", {}).get("orderId", "N/A")
+    return (
+        "🟢 <b>DEMO - Đặt lệnh thị trường</b>\n\n"
+        f"📌 Lệnh     : <b>{'MUA (LONG)' if signal['side'] == 'LONG' else 'BÁN (SHORT)'}</b>\n"
+        f"🎯 Entry    : <b>{format_price(signal['entry'])}</b>\n"
+        f"🛑 Cắt lỗ   : <b>{format_price(signal['sl'])}</b>\n"
+        f"✅ Chốt lời : <b>{format_price(signal['tp'])}</b>\n"
+        f"💵 Số dư VST: <b>{get_vst_balance_text()}</b>\n"
+        f"🧾 Order ID : <b>{order_id}</b>\n"
+        f"⏰ Thời gian : <b>{now_vn().strftime('%d/%m %H:%M')} (GMT+7)</b>"
+    )
 
 # ==========================================
 # 4. BACKGROUND FETCH & MAIN LOOP
@@ -175,24 +263,31 @@ threading.Thread(target=_bg_fetcher, daemon=True).start()
 time.sleep(10) # Đợi dữ liệu lần đầu
 
 vst_bal = bing_client.get_vst_balance()
-send_telegram(f"🚀 <b>Bot SMC Khởi động</b>\n💵 Số dư: <b>{vst_bal} VST</b>")
+send_telegram(format_startup_msg(vst_bal))
 
 last_signal_key = None
+last_status_candle = None
 while True:
     try:
         with _lock: df = _df_cache["df"]
         if df is None: time.sleep(5); continue
 
+        last_closed = df.iloc[-2]
+        candle_time = str(last_closed["datetime"])
         signal = scan_signal(df)
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
-                send_telegram(f"🎯 Tín hiệu: {signal['side']} @ {signal['entry']}")
+                send_telegram(format_signal_msg(signal))
                 last_signal_key = sig_key
                 # Đặt lệnh
                 order = bing_client.place_market_order("BUY" if signal['side']=='LONG' else "SELL", 
                                                        signal['side'], 1, signal['tp'], signal['sl'])
+                send_telegram(format_order_result_msg(signal, order))
                 print(f"Order Result: {order}")
+        elif candle_time != last_status_candle:
+            send_telegram(format_status_msg(last_closed["close"], candle_time))
+            last_status_candle = candle_time
 
         time.sleep(10)
     except Exception as e:
