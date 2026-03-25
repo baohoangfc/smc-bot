@@ -49,6 +49,12 @@ LEVERAGE = int(os.environ.get("LEVERAGE", "100"))
 MAX_ACTIVE_ORDERS = int(os.environ.get("MAX_ACTIVE_ORDERS", "3"))
 MIN_TP_PCT = float(os.environ.get("MIN_TP_PCT", "0.20"))
 MIN_SL_PCT = float(os.environ.get("MIN_SL_PCT", "0.20"))
+SCALP_RR_TARGET = float(os.environ.get("SCALP_RR_TARGET", "1.4"))
+SCALP_RR_MIN = float(os.environ.get("SCALP_RR_MIN", "1.0"))
+SCALP_RR_MAX = float(os.environ.get("SCALP_RR_MAX", "1.8"))
+SL_BUFFER_PCT = float(os.environ.get("SL_BUFFER_PCT", "0.08"))
+SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", "6"))
+MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.15"))
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -549,17 +555,51 @@ def add_indicators(df):
     df['atr'] = (df['high'] - df['low']).ewm(span=14, adjust=False).mean()
     return df
 
+def calc_scalp_tp_sl(df, side, entry):
+    """
+    Tính TP/SL theo hướng scalp ngắn:
+    - SL bám cấu trúc swing gần nhất + buffer nhỏ
+    - TP theo RR mục tiêu (mặc định ~1.4R) và bị chặn trong [SCALP_RR_MIN, SCALP_RR_MAX]
+    """
+    if len(df) < max(SWING_LOOKBACK + 2, 10):
+        return None, None, None
+
+    recent = df.iloc[-(SWING_LOOKBACK + 2):-1]
+    atr_val = float(df['atr'].iloc[-2]) if 'atr' in df.columns and not pd.isna(df['atr'].iloc[-2]) else 0
+    buffer_by_pct = float(entry) * (SL_BUFFER_PCT / 100.0)
+    buffer = max(0.5, buffer_by_pct, atr_val * 0.1)
+    min_risk = max(0.5, float(entry) * (MIN_RISK_PCT / 100.0))
+
+    if side == "LONG":
+        structure_sl = float(recent['low'].min()) - buffer
+        risk = max(float(entry) - structure_sl, min_risk)
+        sl = float(entry) - risk
+        rr_used = min(max(SCALP_RR_TARGET, SCALP_RR_MIN), SCALP_RR_MAX)
+        tp = float(entry) + (risk * rr_used)
+    else:
+        structure_sl = float(recent['high'].max()) + buffer
+        risk = max(structure_sl - float(entry), min_risk)
+        sl = float(entry) + risk
+        rr_used = min(max(SCALP_RR_TARGET, SCALP_RR_MIN), SCALP_RR_MAX)
+        tp = float(entry) - (risk * rr_used)
+
+    return round(tp, 2), round(sl, 2), rr_used
+
 def scan_signal(df):
     # Chỉ dùng nến đã đóng để tránh spam noti khi nến hiện tại còn chạy.
     if len(df) < 6: return None
     last_closed = df.iloc[-2]
     if last_closed['close'] > df['ema200'].iloc[-2]: # Giả định tín hiệu Long đơn giản
         e = round(float(last_closed['close']), 2)
+        tp, sl, rr_used = calc_scalp_tp_sl(df, "LONG", e)
+        if tp is None or sl is None:
+            return None
         return {
             'side': 'LONG',
             'entry': e,
-            'sl': round(e - 2, 2),
-            'tp': round(e + 4, 2),
+            'sl': sl,
+            'tp': tp,
+            'rr': rr_used,
             'candle_time': str(last_closed['datetime'])
         }
     return None
@@ -577,7 +617,8 @@ def format_startup_msg(vst_balance):
 def format_signal_msg(signal, order_label=None):
     emoji = "🟢" if signal["side"] == "LONG" else "🔴"
     side_text = "MUA (LONG)" if signal["side"] == "LONG" else "BÁN (SHORT)"
-    rr_text = f"1:{RR:.1f}"
+    rr_value = signal.get("rr", SCALP_RR_TARGET)
+    rr_text = f"1:{rr_value:.1f}"
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     return (
         f"{emoji} <b>TÍN HIỆU SMC - {SYMBOL} {INTERVAL}</b>\n\n"
