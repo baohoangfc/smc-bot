@@ -3,10 +3,8 @@ import pandas as pd
 import numpy as np
 import time
 import os
-import json
 import hmac
 import hashlib
-import urllib.parse
 from datetime import datetime, timedelta
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -64,11 +62,12 @@ class BingXClient:
 
     def _build_signed_query(self, params):
         """
-        BingX yêu cầu ký theo query đã sort key.
-        Tạo query string cố định để tránh sai khác giữa lúc ký và lúc requests encode.
+        BingX yêu cầu ký theo chuỗi query đã sort key.
+        Theo sample code, cần ký trên chuỗi key=value chưa URL-encode để
+        tránh mismatch giữa chuỗi ký và chuỗi backend verify.
         """
         normalized = {k: str(v) for k, v in params.items() if v is not None}
-        query_string = urllib.parse.urlencode(sorted(normalized.items()), safe='-_.~')
+        query_string = "&".join([f"{k}={normalized[k]}" for k in sorted(normalized.keys())])
         signature = hmac.new(
             self.secret_key.encode("utf-8"),
             query_string.encode("utf-8"),
@@ -76,21 +75,31 @@ class BingXClient:
         ).hexdigest()
         return f"{query_string}&signature={signature}"
 
+    def _signed_request(self, method, path, params, timeout=15):
+        headers = {"X-BX-APIKEY": self.api_key, "Content-Type": "application/x-www-form-urlencoded"}
+        signed_query = self._build_signed_query(params)
+        if method.upper() == "GET":
+            r = requests.get(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=timeout)
+        else:
+            r = requests.post(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=timeout)
+        return r.json()
+
     def get_vst_balance(self):
         """Lấy số dư VST và in phản hồi để debug"""
         path = "/openApi/swap/v2/user/balance"
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
-        headers = {"X-BX-APIKEY": self.api_key}
         try:
-            signed_query = self._build_signed_query(params)
-            r = requests.get(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=10)
-            data = r.json()
+            data = self._signed_request("GET", path, params, timeout=10)
             # In ra log Railway để bạn kiểm tra lý do 0.0
             print(f"[DEBUG] BingX Balance Response: {data}")
             
             if data.get("code") == 0:
-                for asset in data.get("data", {}).get("balance", []):
-                    if asset["asset"] == "VST": return float(asset["balance"])
+                balances = data.get("data", {}).get("balance", [])
+                if isinstance(balances, dict):
+                    balances = [balances]
+                for asset in balances:
+                    if asset.get("asset") == "VST":
+                        return float(asset.get("balance", 0))
             else:
                 print(f"[ERROR] BingX trả về lỗi: {data.get('msg')}")
         except Exception as e:
@@ -104,14 +113,12 @@ class BingXClient:
             "type": "MARKET", "quantity": quantity,
             "timestamp": int(time.time() * 1000), "recvWindow": 5000
         }
-        if tp: params["takeProfit"] = json.dumps({"type": "MARKET", "stopPrice": tp, "price": tp}, separators=(',', ':'))
-        if sl: params["stopLoss"] = json.dumps({"type": "MARKET", "stopPrice": sl, "price": sl}, separators=(',', ':'))
-        
-        headers = {"X-BX-APIKEY": self.api_key, "Content-Type": "application/x-www-form-urlencoded"}
+        if tp or sl:
+            print("[INFO] Bỏ qua TP/SL trong lệnh MARKET để tránh lỗi chữ ký; nên đặt TP/SL bằng endpoint điều kiện riêng sau khi khớp lệnh.")
+
         try:
-            signed_query = self._build_signed_query(params)
-            r = requests.post(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=15)
-            return r.json()
+            data = self._signed_request("POST", path, params, timeout=15)
+            return data
         except: return None
 
 bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
