@@ -140,6 +140,11 @@ class BingXClient:
             r = requests.post(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=timeout)
         return r.json()
 
+    def _public_request(self, path, params=None, timeout=15):
+        params = params or {}
+        r = requests.get(f"{BINGX_URL}{path}", params=params, timeout=timeout)
+        return r.json()
+
     def get_balance_info(self, asset_name="VST"):
         """Lấy thông tin số dư chi tiết (balance/equity/availableMargin)."""
         path = "/openApi/swap/v2/user/balance"
@@ -187,9 +192,116 @@ class BingXClient:
                     continue
                 side = "LONG" if qty > 0 else "SHORT"
                 entry = float(p.get("avgPrice", 0) or 0)
-                return {"side": side, "entry": entry, "quantity": abs(qty), "opened_at": now_vn()}
+                return {
+                    "side": side,
+                    "entry": entry,
+                    "quantity": abs(qty),
+                    "opened_at": now_vn(),
+                    "unrealizedProfit": float(p.get("unrealizedProfit", 0) or 0),
+                    "positionValue": float(p.get("positionValue", 0) or 0),
+                    "markPrice": float(p.get("markPrice", 0) or 0)
+                }
         except Exception as e:
             print(f"[WARN] get_open_position exception: {e}")
+        return None
+
+    def get_last_price(self):
+        """
+        Lấy giá mới nhất trực tiếp từ BingX quote API.
+        Thử lần lượt các endpoint để tương thích nhiều phiên bản API.
+        """
+        candidates = [
+            "/openApi/swap/v2/quote/price",
+            "/openApi/swap/v3/quote/price",
+            "/openApi/swap/v1/ticker/price",
+        ]
+        for path in candidates:
+            try:
+                data = self._public_request(path, {"symbol": SYMBOL}, timeout=10)
+                if data.get("code") != 0:
+                    continue
+                payload = data.get("data", {})
+                # Một số endpoint trả list, một số trả dict
+                if isinstance(payload, list):
+                    payload = payload[0] if payload else {}
+                price = (
+                    payload.get("price")
+                    or payload.get("close")
+                    or payload.get("lastPrice")
+                    or payload.get("markPrice")
+                )
+                if price is not None:
+                    return float(price)
+            except Exception:
+                continue
+        return None
+
+    def get_klines(self, interval="15m", limit=500):
+        """
+        Lấy nến trực tiếp từ BingX thay vì nguồn ngoài để đảm bảo khớp dữ liệu sàn.
+        """
+        endpoints = [
+            "/openApi/swap/v3/quote/klines",
+            "/openApi/swap/v2/quote/klines",
+        ]
+        for path in endpoints:
+            try:
+                data = self._public_request(path, {"symbol": SYMBOL, "interval": interval, "limit": limit}, timeout=15)
+                if data.get("code") != 0:
+                    continue
+                rows = data.get("data", [])
+                if not rows:
+                    continue
+                # Chuẩn hóa về DataFrame: [ts, open, high, low, close, volume, ...]
+                if isinstance(rows[0], list):
+                    df = pd.DataFrame(rows)
+                    if df.shape[1] < 5:
+                        continue
+                    ts = pd.to_numeric(df.iloc[:, 0], errors="coerce")
+                    # BingX có thể trả ts theo giây/ms
+                    if ts.dropna().median() > 1e12:
+                        dt = pd.to_datetime(ts, unit="ms")
+                    else:
+                        dt = pd.to_datetime(ts, unit="s")
+                    out = pd.DataFrame({
+                        "open": pd.to_numeric(df.iloc[:, 1], errors="coerce"),
+                        "high": pd.to_numeric(df.iloc[:, 2], errors="coerce"),
+                        "low": pd.to_numeric(df.iloc[:, 3], errors="coerce"),
+                        "close": pd.to_numeric(df.iloc[:, 4], errors="coerce"),
+                        "datetime": dt + pd.Timedelta(hours=7)
+                    })
+                    out = out.dropna().tail(limit).reset_index(drop=True)
+                    if len(out) > 0:
+                        return out
+                # fallback nếu data là list dict
+                if isinstance(rows[0], dict):
+                    out = pd.DataFrame(rows)
+                    rename_map = {
+                        "openPrice": "open",
+                        "highPrice": "high",
+                        "lowPrice": "low",
+                        "closePrice": "close",
+                    }
+                    out = out.rename(columns=rename_map)
+                    ts_col = None
+                    for c in ["time", "timestamp", "openTime"]:
+                        if c in out.columns:
+                            ts_col = c
+                            break
+                    if ts_col is None:
+                        continue
+                    ts = pd.to_numeric(out[ts_col], errors="coerce")
+                    if ts.dropna().median() > 1e12:
+                        out["datetime"] = pd.to_datetime(ts, unit="ms") + pd.Timedelta(hours=7)
+                    else:
+                        out["datetime"] = pd.to_datetime(ts, unit="s") + pd.Timedelta(hours=7)
+                    for col in ["open", "high", "low", "close"]:
+                        out[col] = pd.to_numeric(out[col], errors="coerce")
+                    out = out[["open", "high", "low", "close", "datetime"]].dropna().tail(limit).reset_index(drop=True)
+                    if len(out) > 0:
+                        return out
+            except Exception:
+                continue
         return None
 
     def set_leverage(self, side="LONG", leverage=100):
@@ -268,20 +380,10 @@ bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 # (Các hàm fetch_data, indicators, SMC Logic giữ nguyên)
 # ==========================================
 def fetch_data(interval="15m", candles=500):
-    yf_map = {"1m":"1m","5m":"5m","15m":"15m","1h":"60m"}
-    yf_interval = yf_map.get(interval, "15m")
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(url, params={"interval": yf_interval, "range": "60d"}, headers=headers, timeout=15)
-        res = r.json().get("chart", {}).get("result", [])[0]
-        df = pd.DataFrame({"open": res["indicators"]["quote"][0]["open"], 
-                           "high": res["indicators"]["quote"][0]["high"],
-                           "low": res["indicators"]["quote"][0]["low"],
-                           "close": res["indicators"]["quote"][0]["close"],
-                           "datetime": pd.to_datetime(res["timestamp"], unit="s") + pd.Timedelta(hours=7)})
-        return df.dropna().tail(candles).reset_index(drop=True)
-    except: return None
+        return bing_client.get_klines(interval=interval, limit=candles)
+    except Exception:
+        return None
 
 def add_indicators(df):
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
@@ -334,7 +436,7 @@ def format_status_msg(last_price, candle_time):
     next_time = pd.to_datetime(candle_time) + timedelta(minutes=interval_to_minutes(INTERVAL))
     return (
         f"🤖 <b>SMC Bot - Cập nhật {format_vn_time(candle_time, '%H:%M')} (GMT+7)</b>\n\n"
-        f"Giá XAUUSDT : <b>{format_price(last_price)}</b>\n"
+        f"Giá {SYMBOL} : <b>{format_price(last_price)}</b>\n"
         f"Khung TG    : <b>{INTERVAL}</b>\n"
         f"Số dư VST   : <b>{get_vst_balance_text()}</b>\n"
         "Trạng thái  : ✅ <b>Đang chạy</b>\n\n"
@@ -370,17 +472,21 @@ def format_pnl_msg(position, last_price):
     side = position["side"]
     qty = position["quantity"]
     entry = position["entry"]
-    if side == "LONG":
-        pnl = (last_price - entry) * qty
-    else:
-        pnl = (entry - last_price) * qty
-    pnl_pct = (pnl / ORDER_NOTIONAL_USDT) * 100 if ORDER_NOTIONAL_USDT else 0
+    pnl = position.get("unrealizedProfit")
+    if pnl is None:
+        if side == "LONG":
+            pnl = (last_price - entry) * qty
+        else:
+            pnl = (entry - last_price) * qty
+    notional_base = position.get("positionValue") or ORDER_NOTIONAL_USDT
+    pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+    price_to_show = position.get("markPrice") or last_price
     return (
         f"{pnl_emoji} <b>Theo dõi lệnh mỗi 1 phút</b>\n\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
-        f"💰 Giá hiện tại: <b>{format_price(last_price)}</b>\n"
+        f"💰 Giá hiện tại: <b>{format_price(price_to_show)}</b>\n"
         f"📦 Khối lượng : <b>{qty}</b>\n"
         f"💵 PnL tạm tính: <b>{pnl:+.2f} USDT ({pnl_pct:+.2f}%)</b>\n"
         f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
@@ -422,6 +528,9 @@ while True:
 
         last_closed = df.iloc[-2]
         candle_time = str(last_closed["datetime"])
+        live_price = bing_client.get_last_price()
+        if live_price is None:
+            live_price = float(last_closed["close"])
         signal = scan_signal(df)
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
@@ -442,7 +551,7 @@ while True:
                 send_telegram(format_signal_msg(signal))
                 last_signal_key = sig_key
                 # Đặt lệnh
-                last_price = float(last_closed["close"])
+                last_price = float(live_price)
                 order_signal = dict(signal)
                 order_signal["tp"], order_signal["sl"] = sanitize_tp_sl(
                     order_signal["side"], order_signal["tp"], order_signal["sl"], last_price
@@ -462,7 +571,7 @@ while True:
                     }
                     last_pnl_notify_ts = 0
         elif candle_time != last_status_candle:
-            send_telegram(format_status_msg(last_closed["close"], candle_time))
+            send_telegram(format_status_msg(live_price, candle_time))
             last_status_candle = candle_time
 
         # Nếu đã vào lệnh, gửi noti lời/lỗ mỗi 1 phút.
@@ -478,7 +587,7 @@ while True:
                     time.sleep(10)
                     continue
                 active_position = exchange_pos
-                send_telegram(format_pnl_msg(active_position, float(last_closed["close"])))
+                send_telegram(format_pnl_msg(active_position, float(live_price)))
                 last_pnl_notify_ts = now_ts
 
         time.sleep(10)
