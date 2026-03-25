@@ -98,27 +98,33 @@ class BingXClient:
             r = requests.post(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=timeout)
         return r.json()
 
-    def get_vst_balance(self):
-        """Lấy số dư VST và in phản hồi để debug"""
+    def get_balance_info(self, asset_name="VST"):
+        """Lấy thông tin số dư chi tiết (balance/equity/availableMargin)."""
         path = "/openApi/swap/v2/user/balance"
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
         try:
             data = self._signed_request("GET", path, params, timeout=10)
-            # In ra log Railway để bạn kiểm tra lý do 0.0
             print(f"[DEBUG] BingX Balance Response: {data}")
-            
             if data.get("code") == 0:
                 balances = data.get("data", {}).get("balance", [])
                 if isinstance(balances, dict):
                     balances = [balances]
                 for asset in balances:
-                    if asset.get("asset") == "VST":
-                        return float(asset.get("balance", 0))
+                    if asset.get("asset") == asset_name:
+                        return {
+                            "balance": float(asset.get("balance", 0) or 0),
+                            "equity": float(asset.get("equity", 0) or 0),
+                            "availableMargin": float(asset.get("availableMargin", 0) or 0),
+                            "usedMargin": float(asset.get("usedMargin", 0) or 0),
+                        }
             else:
                 print(f"[ERROR] BingX trả về lỗi: {data.get('msg')}")
         except Exception as e:
             print(f"[ERROR] Lỗi kết nối lấy số dư: {e}")
-        return 0.0
+        return {"balance": 0.0, "equity": 0.0, "availableMargin": 0.0, "usedMargin": 0.0}
+
+    def get_vst_balance(self):
+        return self.get_balance_info("VST").get("balance", 0.0)
 
     def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
         path = "/openApi/swap/v2/trade/order"
@@ -129,27 +135,49 @@ class BingXClient:
         }
         if tp is not None:
             params["takeProfit"] = json.dumps(
-                {"type": "MARKET", "stopPrice": tp, "price": tp},
+                {"type": "TAKE_PROFIT_MARKET", "stopPrice": tp, "price": tp},
                 separators=(",", ":")
             )
         if sl is not None:
             params["stopLoss"] = json.dumps(
-                {"type": "MARKET", "stopPrice": sl, "price": sl},
+                {"type": "STOP_MARKET", "stopPrice": sl, "price": sl},
                 separators=(",", ":")
             )
 
+        def _extract_code(resp):
+            try:
+                return int(resp.get("code"))
+            except Exception:
+                return None
+
         try:
             data = self._signed_request("POST", path, params, timeout=15)
-            if data.get("code") != 0 and (tp is not None or sl is not None):
+
+            if _extract_code(data) != 0 and (tp is not None or sl is not None):
                 print(f"[WARN] Đặt lệnh kèm TP/SL lỗi, thử lại không kèm TP/SL: {data}")
-                fallback = {
+                params = {
                     "symbol": SYMBOL, "side": side, "positionSide": pos_side,
                     "type": "MARKET", "quantity": quantity,
                     "timestamp": int(time.time() * 1000), "recvWindow": 5000
                 }
-                data = self._signed_request("POST", path, fallback, timeout=15)
+                data = self._signed_request("POST", path, params, timeout=15)
+
+            # Nếu thiếu margin, giảm dần khối lượng và thử lại.
+            cur_qty = float(quantity)
+            while _extract_code(data) == 101204 and cur_qty > 0.001:
+                cur_qty = round(cur_qty / 2, 4)
+                retry_params = {
+                    "symbol": SYMBOL, "side": side, "positionSide": pos_side,
+                    "type": "MARKET", "quantity": cur_qty,
+                    "timestamp": int(time.time() * 1000), "recvWindow": 5000
+                }
+                print(f"[WARN] Insufficient margin, thử lại quantity={cur_qty}")
+                data = self._signed_request("POST", path, retry_params, timeout=15)
+
             return data
-        except: return None
+        except Exception as e:
+            print(f"[ERROR] place_market_order exception: {e}")
+            return None
 
 bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
