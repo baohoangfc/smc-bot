@@ -44,6 +44,8 @@ BINGX_URL        = "https://open-api-vst.bingx.com"
 SYMBOL           = os.environ.get("BINGX_SYMBOL", "NCCOGOLD2USD-USDT")
 INTERVAL         = os.environ.get("INTERVAL", "15m")
 RR               = float(os.environ.get("RR", "2.0"))
+ORDER_NOTIONAL_USDT = float(os.environ.get("ORDER_NOTIONAL_USDT", "1000"))
+LEVERAGE = int(os.environ.get("LEVERAGE", "100"))
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -65,6 +67,46 @@ def send_telegram(msg):
     try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
     except: pass
+
+def calc_order_quantity(entry_price, notional_usdt=ORDER_NOTIONAL_USDT):
+    """
+    quantity theo notional cố định (USDT): qty = notional / entry_price.
+    Ví dụ notional=1000 thì mỗi lệnh luôn trị giá ~1000 USDT (đã bao gồm leverage theo cấu hình tài khoản).
+    """
+    if entry_price is None or entry_price <= 0:
+        return 0
+    qty = notional_usdt / float(entry_price)
+    return round(max(qty, 0), 4)
+
+def sanitize_tp_sl(side, tp, sl, last_price, min_gap=0.5):
+    """
+    Chuẩn hóa TP/SL để tránh lỗi validate kiểu:
+    - LONG: TP phải > Last Price, SL phải < Last Price
+    - SHORT: TP phải < Last Price, SL phải > Last Price
+    """
+    if last_price is None:
+        return tp, sl
+
+    lp = float(last_price)
+    safe_tp = float(tp) if tp is not None else None
+    safe_sl = float(sl) if sl is not None else None
+
+    if side == "LONG":
+        if safe_tp is not None and safe_tp <= lp:
+            safe_tp = lp + min_gap
+        if safe_sl is not None and safe_sl >= lp:
+            safe_sl = lp - min_gap
+    else:
+        if safe_tp is not None and safe_tp >= lp:
+            safe_tp = lp - min_gap
+        if safe_sl is not None and safe_sl <= lp:
+            safe_sl = lp + min_gap
+
+    if safe_tp is not None:
+        safe_tp = round(safe_tp, 2)
+    if safe_sl is not None:
+        safe_sl = round(safe_sl, 2)
+    return safe_tp, safe_sl
 
 # ==========================================
 # 3. BINGX API CLIENT (Đã thêm Log để debug số dư)
@@ -125,6 +167,47 @@ class BingXClient:
 
     def get_vst_balance(self):
         return self.get_balance_info("VST").get("balance", 0.0)
+
+    def get_open_position(self):
+        """
+        Lấy vị thế đang mở của SYMBOL để tránh vào lệnh trùng/đóng lệnh ngoài ý muốn khi restart bot.
+        """
+        path = "/openApi/swap/v2/user/positions"
+        params = {"symbol": SYMBOL, "timestamp": int(time.time() * 1000), "recvWindow": 5000}
+        try:
+            data = self._signed_request("GET", path, params, timeout=10)
+            if data.get("code") != 0:
+                return None
+            positions = data.get("data", [])
+            if isinstance(positions, dict):
+                positions = [positions]
+            for p in positions:
+                qty = float(p.get("positionAmt", 0) or 0)
+                if qty == 0:
+                    continue
+                side = "LONG" if qty > 0 else "SHORT"
+                entry = float(p.get("avgPrice", 0) or 0)
+                return {"side": side, "entry": entry, "quantity": abs(qty), "opened_at": now_vn()}
+        except Exception as e:
+            print(f"[WARN] get_open_position exception: {e}")
+        return None
+
+    def set_leverage(self, side="LONG", leverage=100):
+        path = "/openApi/swap/v2/trade/leverage"
+        params = {
+            "symbol": SYMBOL,
+            "side": side,
+            "leverage": int(leverage),
+            "timestamp": int(time.time() * 1000),
+            "recvWindow": 5000
+        }
+        try:
+            data = self._signed_request("POST", path, params, timeout=10)
+            print(f"[INFO] Set leverage {side} x{leverage}: {data}")
+            return data
+        except Exception as e:
+            print(f"[WARN] set_leverage {side} exception: {e}")
+            return None
 
     def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
         path = "/openApi/swap/v2/trade/order"
@@ -269,7 +352,38 @@ def format_order_result_msg(signal, order_result):
         f"✅ Chốt lời : <b>{format_price(signal['tp'])}</b>\n"
         f"💵 Số dư VST: <b>{get_vst_balance_text()}</b>\n"
         f"🧾 Order ID : <b>{order_id}</b>\n"
+        f"📦 Notional : <b>{ORDER_NOTIONAL_USDT:.0f} USDT</b>\n"
+        f"⚙️ Leverage  : <b>x{LEVERAGE}</b>\n"
         f"⏰ Thời gian : <b>{now_vn().strftime('%d/%m %H:%M')} (GMT+7)</b>"
+    )
+
+def extract_order_avg_price(order_result, fallback_price):
+    try:
+        avg_price = order_result.get("data", {}).get("order", {}).get("avgPrice")
+        if avg_price is not None and float(avg_price) > 0:
+            return float(avg_price)
+    except Exception:
+        pass
+    return float(fallback_price)
+
+def format_pnl_msg(position, last_price):
+    side = position["side"]
+    qty = position["quantity"]
+    entry = position["entry"]
+    if side == "LONG":
+        pnl = (last_price - entry) * qty
+    else:
+        pnl = (entry - last_price) * qty
+    pnl_pct = (pnl / ORDER_NOTIONAL_USDT) * 100 if ORDER_NOTIONAL_USDT else 0
+    pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+    return (
+        f"{pnl_emoji} <b>Theo dõi lệnh mỗi 1 phút</b>\n\n"
+        f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
+        f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
+        f"💰 Giá hiện tại: <b>{format_price(last_price)}</b>\n"
+        f"📦 Khối lượng : <b>{qty}</b>\n"
+        f"💵 PnL tạm tính: <b>{pnl:+.2f} USDT ({pnl_pct:+.2f}%)</b>\n"
+        f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
 
 # ==========================================
@@ -291,10 +405,16 @@ threading.Thread(target=_bg_fetcher, daemon=True).start()
 time.sleep(10) # Đợi dữ liệu lần đầu
 
 vst_bal = bing_client.get_vst_balance()
+active_position = bing_client.get_open_position()
+if not active_position:
+    bing_client.set_leverage("LONG", LEVERAGE)
+    bing_client.set_leverage("SHORT", LEVERAGE)
 send_telegram(format_startup_msg(vst_bal))
 
 last_signal_key = None
 last_status_candle = None
+last_pnl_notify_ts = 0
+bootstrapped_signal = False
 while True:
     try:
         with _lock: df = _df_cache["df"]
@@ -305,17 +425,61 @@ while True:
         signal = scan_signal(df)
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
+            # Khi restart bot: ghi nhận tín hiệu hiện tại, chỉ trade từ tín hiệu mới tiếp theo.
+            if not bootstrapped_signal:
+                last_signal_key = sig_key
+                bootstrapped_signal = True
+                print(f"[INFO] Bootstrapped signal: {sig_key} - chờ tín hiệu mới để vào lệnh.")
+                time.sleep(10)
+                continue
             if sig_key != last_signal_key:
+                # Nếu còn vị thế mở, không vào thêm lệnh để tránh đóng/mở chồng khi khởi động lại.
+                if active_position:
+                    print("[INFO] Đang có vị thế mở, bỏ qua tín hiệu mới.")
+                    last_signal_key = sig_key
+                    time.sleep(10)
+                    continue
                 send_telegram(format_signal_msg(signal))
                 last_signal_key = sig_key
                 # Đặt lệnh
+                last_price = float(last_closed["close"])
+                order_signal = dict(signal)
+                order_signal["tp"], order_signal["sl"] = sanitize_tp_sl(
+                    order_signal["side"], order_signal["tp"], order_signal["sl"], last_price
+                )
+                quantity = calc_order_quantity(last_price, ORDER_NOTIONAL_USDT)
                 order = bing_client.place_market_order("BUY" if signal['side']=='LONG' else "SELL", 
-                                                       signal['side'], 1, signal['tp'], signal['sl'])
-                send_telegram(format_order_result_msg(signal, order))
+                                                       signal['side'], quantity, order_signal['tp'], order_signal['sl'])
+                send_telegram(format_order_result_msg(order_signal, order))
                 print(f"Order Result: {order}")
+                if order and order.get("code") == 0:
+                    fill_price = extract_order_avg_price(order, last_price)
+                    active_position = {
+                        "side": signal["side"],
+                        "entry": fill_price,
+                        "quantity": float(quantity),
+                        "opened_at": now_vn()
+                    }
+                    last_pnl_notify_ts = 0
         elif candle_time != last_status_candle:
             send_telegram(format_status_msg(last_closed["close"], candle_time))
             last_status_candle = candle_time
+
+        # Nếu đã vào lệnh, gửi noti lời/lỗ mỗi 1 phút.
+        if active_position:
+            now_ts = time.time()
+            if now_ts - last_pnl_notify_ts >= 60:
+                # Đồng bộ lại trạng thái vị thế từ sàn (đề phòng đã đóng do TP/SL).
+                exchange_pos = bing_client.get_open_position()
+                if not exchange_pos:
+                    send_telegram("✅ <b>Vị thế đã đóng trên BingX</b>\nDừng theo dõi PnL cho lệnh trước.")
+                    active_position = None
+                    last_pnl_notify_ts = now_ts
+                    time.sleep(10)
+                    continue
+                active_position = exchange_pos
+                send_telegram(format_pnl_msg(active_position, float(last_closed["close"])))
+                last_pnl_notify_ts = now_ts
 
         time.sleep(10)
     except Exception as e:
