@@ -135,7 +135,11 @@ class BingXClient:
         Theo sample code, cần ký trên chuỗi key=value chưa URL-encode để
         tránh mismatch giữa chuỗi ký và chuỗi backend verify.
         """
-        normalized = {k: str(v) for k, v in params.items() if v is not None}
+        def _normalize(v):
+            if isinstance(v, bool):
+                return "true" if v else "false"
+            return str(v)
+        normalized = {k: _normalize(v) for k, v in params.items() if v is not None}
         query_string = "&".join([f"{k}={normalized[k]}" for k in sorted(normalized.keys())])
         signature = hmac.new(
             self.secret_key.encode("utf-8"),
@@ -423,7 +427,7 @@ class BingXClient:
                     "type": "TAKE_PROFIT_MARKET",
                     "stopPrice": tp,
                     "price": tp,
-                    "closePosition": True,
+                    "closePosition": "true",
                     "timestamp": int(time.time() * 1000),
                     "recvWindow": 5000
                 }
@@ -440,7 +444,7 @@ class BingXClient:
                     "type": "STOP_MARKET",
                     "stopPrice": sl,
                     "price": sl,
-                    "closePosition": True,
+                    "closePosition": "true",
                     "timestamp": int(time.time() * 1000),
                     "recvWindow": 5000
                 }
@@ -527,14 +531,15 @@ def format_status_msg(last_price, candle_time):
         f"Cập nhật tiếp theo lúc <b>{format_vn_time(next_time, '%H:%M')}</b>"
     )
 
-def format_order_result_msg(signal, order_result, order_label=None):
+def format_order_result_msg(signal, order_result, order_label=None, filled_entry=None):
     order_id = (order_result or {}).get("data", {}).get("order", {}).get("orderId", "N/A")
+    entry_to_show = filled_entry if filled_entry is not None else signal.get("entry")
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     return (
         "🟢 <b>DEMO - Đặt lệnh thị trường</b>\n\n"
         f"{order_line}"
         f"📌 Lệnh     : <b>{'MUA (LONG)' if signal['side'] == 'LONG' else 'BÁN (SHORT)'}</b>\n"
-        f"🎯 Entry    : <b>{format_price(signal['entry'])}</b>\n"
+        f"🎯 Entry    : <b>{format_price(entry_to_show)}</b>\n"
         f"🛑 Cắt lỗ   : <b>{format_price(signal['sl'])}</b>\n"
         f"✅ Chốt lời : <b>{format_price(signal['tp'])}</b>\n"
         f"💵 Số dư VST: <b>{get_vst_balance_text()}</b>\n"
@@ -702,10 +707,10 @@ while True:
                 quantity = calc_order_quantity(last_price, ORDER_NOTIONAL_USDT)
                 order = bing_client.place_market_order("BUY" if signal['side']=='LONG' else "SELL", 
                                                        signal['side'], quantity, order_signal['tp'], order_signal['sl'])
-                send_telegram(format_order_result_msg(order_signal, order, order_label))
                 print(f"Order Result: {order}")
                 if order and order.get("code") == 0:
                     fill_price = extract_order_avg_price(order, last_price)
+                    send_telegram(format_order_result_msg(order_signal, order, order_label, fill_price))
                     protection_result = bing_client.add_missing_tp_sl(
                         signal["side"], order_signal.get("tp"), order_signal.get("sl")
                     )
@@ -737,6 +742,13 @@ while True:
                         "opened_at": now_vn()
                     })
                     last_pnl_notify_ts = 0
+                else:
+                    err_msg = (order or {}).get("msg", "Không rõ lỗi")
+                    send_telegram(
+                        "❌ <b>Đặt lệnh thất bại</b>\n"
+                        f"🆔 Mã lệnh: <b>{order_label}</b>\n"
+                        f"Lý do: <b>{err_msg}</b>"
+                    )
         elif candle_time != last_status_candle:
             send_telegram(format_status_msg(live_price, candle_time))
             last_status_candle = candle_time
