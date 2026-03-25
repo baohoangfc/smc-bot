@@ -47,6 +47,8 @@ RR               = float(os.environ.get("RR", "2.0"))
 ORDER_NOTIONAL_USDT = float(os.environ.get("ORDER_NOTIONAL_USDT", "1000"))
 LEVERAGE = int(os.environ.get("LEVERAGE", "100"))
 MAX_ACTIVE_ORDERS = int(os.environ.get("MAX_ACTIVE_ORDERS", "3"))
+MIN_TP_PCT = float(os.environ.get("MIN_TP_PCT", "0.20"))
+MIN_SL_PCT = float(os.environ.get("MIN_SL_PCT", "0.20"))
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -120,6 +122,78 @@ def sanitize_tp_sl(side, tp, sl, last_price, min_gap=0.5):
     if safe_sl is not None:
         safe_sl = round(safe_sl, 2)
     return safe_tp, safe_sl
+
+def enforce_tp_sl_safety(side, entry, tp, sl, last_price):
+    """
+    Đảm bảo TP/SL hợp lệ đồng thời theo:
+    - khoảng cách tối thiểu so với entry (tránh TP quá sát => lời rất ít)
+    - quy tắc validate theo giá thị trường hiện tại của sàn
+    """
+    if entry is None or entry <= 0:
+        return sanitize_tp_sl(side, tp, sl, last_price)
+
+    e = float(entry)
+    safe_tp = float(tp) if tp is not None else None
+    safe_sl = float(sl) if sl is not None else None
+    min_gap = 0.5
+    min_tp_gap = max(min_gap, e * (MIN_TP_PCT / 100.0))
+    min_sl_gap = max(min_gap, e * (MIN_SL_PCT / 100.0))
+
+    if side == "LONG":
+        min_tp_from_entry = e + min_tp_gap
+        max_sl_from_entry = e - min_sl_gap
+        if safe_tp is None or safe_tp < min_tp_from_entry:
+            safe_tp = min_tp_from_entry
+        if safe_sl is None or safe_sl > max_sl_from_entry:
+            safe_sl = max_sl_from_entry
+    else:
+        max_tp_from_entry = e - min_tp_gap
+        min_sl_from_entry = e + min_sl_gap
+        if safe_tp is None or safe_tp > max_tp_from_entry:
+            safe_tp = max_tp_from_entry
+        if safe_sl is None or safe_sl < min_sl_from_entry:
+            safe_sl = min_sl_from_entry
+
+    safe_tp, safe_sl = sanitize_tp_sl(side, safe_tp, safe_sl, last_price, min_gap=min_gap)
+    return safe_tp, safe_sl
+
+def normalize_tp_sl_by_entry(side, entry, tp, sl):
+    """
+    Bảo vệ TP/SL theo entry để tránh:
+    - TP quá sát giá vào lệnh (reward gần như bằng 0)
+    - SL đặt sai phía hoặc quá sát entry
+    """
+    if entry is None or entry <= 0:
+        return tp, sl, False
+
+    e = float(entry)
+    safe_tp = float(tp) if tp is not None else None
+    safe_sl = float(sl) if sl is not None else None
+    changed = False
+
+    min_tp_gap = max(0.5, e * (MIN_TP_PCT / 100.0))
+    min_sl_gap = max(0.5, e * (MIN_SL_PCT / 100.0))
+
+    if side == "LONG":
+        if safe_sl is None or safe_sl >= e:
+            safe_sl = e - min_sl_gap
+            changed = True
+        risk = max(e - safe_sl, min_sl_gap)
+        ideal_tp = e + max(min_tp_gap, risk * RR)
+        if safe_tp is None or safe_tp <= e or (safe_tp - e) < min_tp_gap:
+            safe_tp = ideal_tp
+            changed = True
+    else:
+        if safe_sl is None or safe_sl <= e:
+            safe_sl = e + min_sl_gap
+            changed = True
+        risk = max(safe_sl - e, min_sl_gap)
+        ideal_tp = e - max(min_tp_gap, risk * RR)
+        if safe_tp is None or safe_tp >= e or (e - safe_tp) < min_tp_gap:
+            safe_tp = ideal_tp
+            changed = True
+
+    return round(safe_tp, 2), round(safe_sl, 2), changed
 
 # ==========================================
 # 3. BINGX API CLIENT (Đã thêm Log để debug số dư)
@@ -701,9 +775,23 @@ while True:
                 # Đặt lệnh
                 last_price = float(live_price)
                 order_signal = dict(signal)
-                order_signal["tp"], order_signal["sl"] = sanitize_tp_sl(
-                    order_signal["side"], order_signal["tp"], order_signal["sl"], last_price
+                order_signal["tp"], order_signal["sl"], levels_changed = normalize_tp_sl_by_entry(
+                    order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl")
                 )
+                pre_safe_tp, pre_safe_sl = order_signal["tp"], order_signal["sl"]
+                order_signal["tp"], order_signal["sl"] = enforce_tp_sl_safety(
+                    order_signal["side"], last_price, order_signal["tp"], order_signal["sl"], last_price
+                )
+                levels_changed = levels_changed or (
+                    pre_safe_tp != order_signal["tp"] or pre_safe_sl != order_signal["sl"]
+                )
+                if levels_changed:
+                    send_telegram(
+                        "🛠️ <b>Đã hiệu chỉnh TP/SL trước khi vào lệnh</b>\n"
+                        f"TP: <b>{format_price(order_signal['tp'])}</b> | "
+                        f"SL: <b>{format_price(order_signal['sl'])}</b>\n"
+                        f"Tiêu chí: TP tối thiểu {MIN_TP_PCT:.2f}% và SL tối thiểu {MIN_SL_PCT:.2f}% so với entry."
+                    )
                 quantity = calc_order_quantity(last_price, ORDER_NOTIONAL_USDT)
                 order = bing_client.place_market_order("BUY" if signal['side']=='LONG' else "SELL", 
                                                        signal['side'], quantity, order_signal['tp'], order_signal['sl'])
