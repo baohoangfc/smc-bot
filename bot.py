@@ -33,7 +33,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ==========================================
-# 2. CONFIG & BẢO MẬT (Railway Variables)
+# 2. CONFIG & BẢO MẬT (Lấy từ Railway Variables)
 # ==========================================
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -66,7 +66,7 @@ def send_telegram(msg):
         print(f"Telegram loi: {e}")
 
 # ==========================================
-# 4. BINGX API CLIENT (Đã sửa lỗi Header)
+# 4. BINGX API CLIENT (Fix Signature & Headers)
 # ==========================================
 class BingXClient:
     def __init__(self, api_key, secret_key):
@@ -74,32 +74,41 @@ class BingXClient:
         self.secret_key = secret_key
 
     def _get_signature(self, params):
-        query_string = urllib.parse.urlencode(params)
+        """Ký xác thực: Sắp xếp tham số A-Z để khớp chuẩn sàn"""
+        # Sắp xếp các key theo bảng chữ cái
+        sorted_params = dict(sorted(params.items()))
+        query_string = urllib.parse.urlencode(sorted_params)
         return hmac.new(self.secret_key.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
     def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
         path = "/openApi/swap/v2/trade/order"
+        
+        # Tham số bắt buộc bao gồm cả apiKey trong chuỗi ký
         params = {
             "symbol": SYMBOL,
             "side": side,
             "positionSide": pos_side,
             "type": "MARKET",
             "quantity": quantity,
-            "timestamp": int(time.time() * 1000)
+            "timestamp": int(time.time() * 1000),
+            "apiKey": self.api_key,
+            "recvWindow": 5000 # Chống lỗi lệch thời gian giữa server bot và sàn
         }
-        if tp: params["takeProfit"] = json.dumps({"type": "MARKET", "stopPrice": tp, "price": tp})
-        if sl: params["stopLoss"] = json.dumps({"type": "MARKET", "stopPrice": sl, "price": sl})
+        
+        # Sử dụng separators để loại bỏ khoảng trắng thừa trong JSON
+        if tp: params["takeProfit"] = json.dumps({"type": "MARKET", "stopPrice": tp, "price": tp}, separators=(',', ':'))
+        if sl: params["stopLoss"] = json.dumps({"type": "MARKET", "stopPrice": sl, "price": sl}, separators=(',', ':'))
         
         params["signature"] = self._get_signature(params)
-        url = f"{BINGX_URL}{path}"
         
-        # Header bắt buộc theo yêu cầu của BingX
+        # Header bắt buộc X-BX-APIKEY
         headers = {
             "X-BX-APIKEY": self.api_key,
             "Content-Type": "application/x-www-form-urlencoded"
         }
         
         try:
+            url = f"{BINGX_URL}{path}"
             r = requests.post(url, params=params, headers=headers, timeout=15)
             return r.json()
         except Exception as e:
@@ -108,7 +117,11 @@ class BingXClient:
 
     def get_vst_balance(self):
         path = "/openApi/swap/v2/user/balance"
-        params = {"timestamp": int(time.time() * 1000)}
+        params = {
+            "timestamp": int(time.time() * 1000),
+            "apiKey": self.api_key,
+            "recvWindow": 5000
+        }
         params["signature"] = self._get_signature(params)
         headers = {"X-BX-APIKEY": self.api_key}
         try:
@@ -123,7 +136,7 @@ class BingXClient:
 bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
 # ==========================================
-# 5. DATA & SMC LOGIC (Giữ nguyên từ bản gốc)
+# 5. DATA & SMC LOGIC (Giữ nguyên)
 # ==========================================
 def fetch_data(interval="15m", candles=500):
     yf_map = {"1m":"1m","5m":"5m","15m":"15m","1h":"60m"}
@@ -152,6 +165,7 @@ def fetch_latest_price():
         return round(float(r.json()["price"]), 2)
     except: return None
 
+# ... (Indicators: ema, rsi, atr, swing logic giữ nguyên)
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 def rsi_calc(s, n=14):
     d = s.diff()
@@ -242,7 +256,6 @@ def _bg_fetcher():
             if df is not None:
                 df = add_indicators(df)
                 with _cache_lock: _df_cache["df"] = df
-                print(f"[BG] Updated | Close: {round(df['close'].iloc[-1],2)}")
         except: pass
         time.sleep(30)
 
@@ -273,9 +286,11 @@ while True:
                 send_telegram(format_signal_msg(signal, fresh_price, INTERVAL))
                 last_signal_key = sig_key
 
-                # Thực thi lệnh trên sàn BingX
+                # Thực thi lệnh trên sàn BingX (VST)
                 side = "BUY" if signal['side'] == 'LONG' else "SELL"
                 pos_side = signal['side']
+                
+                # Quantity mặc định là 1 (Vàng thường yêu cầu bước nhảy tối thiểu)
                 order = bing_client.place_market_order(side, pos_side, 1, signal['tp'], signal['sl'])
                 
                 if order and order.get("code") == 0:
@@ -285,7 +300,7 @@ while True:
                     msg = order.get("msg", "Error") if order else "Connection Error"
                     send_telegram(f"❌ <b>BINGX LỖI:</b> <code>{msg}</code>")
 
-        # Health check mỗi tiếng 1 lần
+        # Health check mỗi tiếng 1 lần để giữ bot sống trên Railway
         if (now_vn() - last_health_time).total_seconds() >= 3600:
             send_telegram(f"🤖 <b>Bot SMC vẫn đang chạy</b>\nGiá GOLD: {fresh_price}")
             last_health_time = now_vn()
