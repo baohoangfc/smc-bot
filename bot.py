@@ -33,7 +33,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ==========================================
-# 2. CONFIG & BẢO MẬT (Lấy từ Railway Variables)
+# 2. CONFIG & BẢO MẬT (Railway Variables)
 # ==========================================
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -66,7 +66,7 @@ def send_telegram(msg):
         print(f"Telegram loi: {e}")
 
 # ==========================================
-# 4. BINGX API CLIENT
+# 4. BINGX API CLIENT (Đã sửa lỗi Header)
 # ==========================================
 class BingXClient:
     def __init__(self, api_key, secret_key):
@@ -78,7 +78,6 @@ class BingXClient:
         return hmac.new(self.secret_key.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
     def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
-        """Đặt lệnh Market trên BingX kèm TP/SL"""
         path = "/openApi/swap/v2/trade/order"
         params = {
             "symbol": SYMBOL,
@@ -86,28 +85,34 @@ class BingXClient:
             "positionSide": pos_side,
             "type": "MARKET",
             "quantity": quantity,
-            "timestamp": int(time.time() * 1000),
-            "apiKey": self.api_key
+            "timestamp": int(time.time() * 1000)
         }
         if tp: params["takeProfit"] = json.dumps({"type": "MARKET", "stopPrice": tp, "price": tp})
         if sl: params["stopLoss"] = json.dumps({"type": "MARKET", "stopPrice": sl, "price": sl})
         
         params["signature"] = self._get_signature(params)
-        url = f"{BINGX_URL}{path}?{urllib.parse.urlencode(params)}"
+        url = f"{BINGX_URL}{path}"
+        
+        # Header bắt buộc theo yêu cầu của BingX
+        headers = {
+            "X-BX-APIKEY": self.api_key,
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        
         try:
-            r = requests.post(url, timeout=15)
+            r = requests.post(url, params=params, headers=headers, timeout=15)
             return r.json()
         except Exception as e:
             print(f"BingX loi: {e}")
             return None
 
     def get_vst_balance(self):
-        """Lấy số dư tài khoản ảo VST"""
         path = "/openApi/swap/v2/user/balance"
-        params = {"timestamp": int(time.time() * 1000), "apiKey": self.api_key}
+        params = {"timestamp": int(time.time() * 1000)}
         params["signature"] = self._get_signature(params)
+        headers = {"X-BX-APIKEY": self.api_key}
         try:
-            r = requests.get(f"{BINGX_URL}{path}", params=params, timeout=10)
+            r = requests.get(f"{BINGX_URL}{path}", params=params, headers=headers, timeout=10)
             data = r.json()
             if data.get("code") == 0:
                 for asset in data["data"]["balance"]:
@@ -147,7 +152,6 @@ def fetch_latest_price():
         return round(float(r.json()["price"]), 2)
     except: return None
 
-# ... (Indicators: ema, rsi, atr, swing_highs, swing_lows, detect_structure, find_ob, v.v. giữ nguyên)
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
 def rsi_calc(s, n=14):
     d = s.diff()
@@ -266,7 +270,6 @@ while True:
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
-                # Bắn noti tín hiệu SMC
                 send_telegram(format_signal_msg(signal, fresh_price, INTERVAL))
                 last_signal_key = sig_key
 
