@@ -59,22 +59,31 @@ def send_telegram(msg):
 # ==========================================
 class BingXClient:
     def __init__(self, api_key, secret_key):
-        self.api_key = api_key
-        self.secret_key = secret_key
+        self.api_key = (api_key or "").strip()
+        self.secret_key = (secret_key or "").strip()
 
-    def _get_signature(self, params):
-        sorted_params = dict(sorted(params.items()))
-        query_string = urllib.parse.urlencode(sorted_params)
-        return hmac.new(self.secret_key.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    def _build_signed_query(self, params):
+        """
+        BingX yêu cầu ký theo query đã sort key.
+        Tạo query string cố định để tránh sai khác giữa lúc ký và lúc requests encode.
+        """
+        normalized = {k: str(v) for k, v in params.items() if v is not None}
+        query_string = urllib.parse.urlencode(sorted(normalized.items()), safe='-_.~')
+        signature = hmac.new(
+            self.secret_key.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        return f"{query_string}&signature={signature}"
 
     def get_vst_balance(self):
         """Lấy số dư VST và in phản hồi để debug"""
         path = "/openApi/swap/v2/user/balance"
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
-        params["signature"] = self._get_signature(params)
         headers = {"X-BX-APIKEY": self.api_key}
         try:
-            r = requests.get(f"{BINGX_URL}{path}", params=params, headers=headers, timeout=10)
+            signed_query = self._build_signed_query(params)
+            r = requests.get(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=10)
             data = r.json()
             # In ra log Railway để bạn kiểm tra lý do 0.0
             print(f"[DEBUG] BingX Balance Response: {data}")
@@ -98,10 +107,10 @@ class BingXClient:
         if tp: params["takeProfit"] = json.dumps({"type": "MARKET", "stopPrice": tp, "price": tp}, separators=(',', ':'))
         if sl: params["stopLoss"] = json.dumps({"type": "MARKET", "stopPrice": sl, "price": sl}, separators=(',', ':'))
         
-        params["signature"] = self._get_signature(params)
         headers = {"X-BX-APIKEY": self.api_key, "Content-Type": "application/x-www-form-urlencoded"}
         try:
-            r = requests.post(f"{BINGX_URL}{path}", params=params, headers=headers, timeout=15)
+            signed_query = self._build_signed_query(params)
+            r = requests.post(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=15)
             return r.json()
         except: return None
 
