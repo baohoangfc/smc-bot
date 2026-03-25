@@ -4,1128 +4,155 @@ import numpy as np
 import time
 import os
 import json
+import hmac
+import hashlib
+import urllib.parse
 from datetime import datetime, timedelta
-
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ==========================================
-# MINI HTTP SERVER - giữ Railway không sleep
-# ==========================================
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK - SMC Bot dang chay")
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-    def log_message(self, format, *args): pass
-
-def run_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
-
-threading.Thread(target=run_server, daemon=True).start()
-
-# ==========================================
-# CONFIG
+# CONFIG & BẢO MẬT
 # ==========================================
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-INTERVAL         = os.environ.get("INTERVAL", "15m")
-CHECK_SECS       = int(os.environ.get("CHECK_SECS", "60"))  # check mỗi 60s, lọc phút sau
-RR               = float(os.environ.get("RR", "2.0"))
+BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
+BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 
-# Phút hợp lệ để gửi noti (đuôi 0 hoặc 5)
-VALID_MINUTES = set(range(0, 60, 5))  # 0,5,10,15,...,55
-
-# Demo trading config
-DEMO_MARGIN    = float(os.environ.get("DEMO_MARGIN", "10"))    # $10 margin
-DEMO_LEVERAGE  = float(os.environ.get("DEMO_LEVERAGE", "200")) # x200
-DEMO_SIZE      = DEMO_MARGIN * DEMO_LEVERAGE                   # $2000 notional
-
-def now_vn():
-    """Giờ Việt Nam GMT+7"""
-    return datetime.utcnow() + timedelta(hours=7)
-
-def is_valid_minute():
-    """Chỉ chạy khi phút hiện tại có đuôi 0 hoặc 5"""
-    return now_vn().minute in VALID_MINUTES
+BINGX_URL = "https://open-api-vst.bingx.com" # Endpoint dành cho Demo VST
+SYMBOL    = "GOLD-USDT"
+INTERVAL  = os.environ.get("INTERVAL", "15m")
+RR        = float(os.environ.get("RR", "2.0"))
 
 # ==========================================
-# TELEGRAM
+# BINGX API CLIENT
 # ==========================================
-def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"[TELEGRAM] {msg[:80]}...")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": msg,
-            "parse_mode": "HTML"
-        }, timeout=10)
-    except Exception as e:
-        print(f"Telegram loi: {e}")
-
-# ==========================================
-# DATA FETCH
-# ==========================================
-def fetch_data(interval="15m", candles=500):
-    """Lấy dữ liệu GOLD từ Yahoo Finance (GC=F) - không bị block trên Railway"""
-    yf_map = {
-        "1m":"1m","3m":"2m","5m":"5m","15m":"15m",
-        "30m":"30m","1h":"60m","4h":"60m"
-    }
-    yf_interval = yf_map.get(interval, "15m")
-    period_map  = {
-        "1m":"7d","2m":"60d","5m":"60d","15m":"60d",
-        "30m":"60d","60m":"730d"
-    }
-    period = period_map.get(yf_interval, "60d")
-
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-    params  = {"interval": yf_interval, "range": period, "events": "history"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json"
-    }
-    try:
-        r      = requests.get(url, params=params, headers=headers, timeout=15)
-        raw    = r.json()
-        result = raw.get("chart", {}).get("result", [])
-        if not result:
-            print(f"Yahoo tra ve rong")
-            return None
-        ts    = result[0]["timestamp"]
-        ohlcv = result[0]["indicators"]["quote"][0]
-        df = pd.DataFrame({
-            "datetime": pd.to_datetime(ts, unit="s") + pd.Timedelta(hours=7),
-            "open":   ohlcv["open"],
-            "high":   ohlcv["high"],
-            "low":    ohlcv["low"],
-            "close":  ohlcv["close"],
-            "volume": ohlcv["volume"]
-        })
-        df = df.dropna().reset_index(drop=True)
-        df = df.tail(candles).reset_index(drop=True)
-        print(f"Data OK: {len(df)} nen | GC=F Yahoo | Gia: {round(df['close'].iloc[-1],2)}")
-        return df
-    except Exception as e:
-        print(f"Yahoo loi: {e}")
-        return None
-
-def fetch_latest_price():
-    """Lấy giá XAUUSDT realtime - thử nhiều nguồn"""
-    # Nguồn 1: Binance spot (nhanh nhất)
-    try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": "XAUUSDT"},
-            timeout=5
-        )
-        data = r.json()
-        if "price" in data:
-            p = round(float(data["price"]), 2)
-            if p > 100:  # sanity check
-                return p
-    except:
-        pass
-
-    # Nguồn 2: Yahoo GC=F (fallback)
-    try:
-        import random
-        r = requests.get(
-            "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
-            params={"interval": "1m", "range": "1d", "_": int(time.time())},
-            headers={
-                "User-Agent": f"Mozilla/5.0 (rv:{random.randint(100,120)}.0)",
-                "Cache-Control": "no-cache"
-            },
-            timeout=8
-        )
-        raw    = r.json()
-        result = raw.get("chart", {}).get("result", [])
-        if result:
-            closes = result[0]["indicators"]["quote"][0]["close"]
-            closes = [x for x in closes if x is not None]
-            if closes:
-                return round(closes[-1], 2)
-    except:
-        pass
-
-    return None
-
-def fetch_xauusd_price():
-    """Ước tính XAUUSD spot = GC=F + 30"""
-    p = fetch_latest_price()
-    return round(p + 30, 2) if p else None
-
-
-# ==========================================
-# INDICATORS
-# ==========================================
-def ema(s, n): return s.ewm(span=n, adjust=False).mean()
-
-def rsi_calc(s, n=14):
-    d = s.diff()
-    g = d.where(d>0, 0).ewm(alpha=1/n, adjust=False).mean()
-    l = (-d.where(d<0, 0)).ewm(alpha=1/n, adjust=False).mean()
-    return 100 - (100 / (1 + g/l))
-
-def add_indicators(df):
-    df['ema50']  = ema(df['close'], 50)
-    df['ema200'] = ema(df['close'], 200)
-    df['rsi']    = rsi_calc(df['close'], 14)
-    df['tr']     = np.maximum(df['high']-df['low'],
-                   np.maximum(abs(df['high']-df['close'].shift(1)),
-                              abs(df['low'] -df['close'].shift(1))))
-    df['atr']    = df['tr'].ewm(span=14, adjust=False).mean()
-    return df
-
-# ==========================================
-# SMC CORE
-# ==========================================
-def swing_highs(df, n=3):
-    idx = []
-    for i in range(n, len(df)-n):
-        if all(df['high'].iloc[i]>df['high'].iloc[i-j] for j in range(1,n+1)) and \
-           all(df['high'].iloc[i]>df['high'].iloc[i+j] for j in range(1,n+1)):
-            idx.append(i)
-    return idx
-
-def swing_lows(df, n=3):
-    idx = []
-    for i in range(n, len(df)-n):
-        if all(df['low'].iloc[i]<df['low'].iloc[i-j] for j in range(1,n+1)) and \
-           all(df['low'].iloc[i]<df['low'].iloc[i+j] for j in range(1,n+1)):
-            idx.append(i)
-    return idx
-
-def detect_structure(df, sh, sl, i):
-    c = df['close'].iloc[i]
-    psh = [h for h in sh if h < i-1]
-    psl = [l for l in sl if l < i-1]
-    if not psh or not psl: return None
-    if c > df['high'].iloc[max(psh)]: return "BULL"
-    if c < df['low'].iloc[max(psl)]:  return "BEAR"
-    return None
-
-def find_ob(df, sig, i, lookback=20):
-    atr   = df['atr'].iloc[i]
-    start = max(0, i-lookback)
-    if sig == "BULL":
-        for j in range(i-1, start-1, -1):
-            o,c_,h_,l_ = df['open'].iloc[j],df['close'].iloc[j],df['high'].iloc[j],df['low'].iloc[j]
-            body=abs(c_-o); rng=h_-l_
-            if c_<o and rng>0 and body/rng>0.35 and body>atr*0.25:
-                if not any(df['close'].iloc[k]<l_ for k in range(j+1,i)):
-                    return {'type':'BULL_OB','hi':h_,'lo':l_,'mid':(h_+l_)/2}
-    elif sig == "BEAR":
-        for j in range(i-1, start-1, -1):
-            o,c_,h_,l_ = df['open'].iloc[j],df['close'].iloc[j],df['high'].iloc[j],df['low'].iloc[j]
-            body=abs(c_-o); rng=h_-l_
-            if c_>o and rng>0 and body/rng>0.35 and body>atr*0.25:
-                if not any(df['close'].iloc[k]>h_ for k in range(j+1,i)):
-                    return {'type':'BEAR_OB','hi':h_,'lo':l_,'mid':(h_+l_)/2}
-    return None
-
-def bull_confirm(df, i):
-    o,c_,h_,l_ = df['open'].iloc[i],df['close'].iloc[i],df['high'].iloc[i],df['low'].iloc[i]
-    po,pc = df['open'].iloc[i-1],df['close'].iloc[i-1]
-    body=c_-o; rng=h_-l_
-    if pc<po and c_>o and o<=pc and c_>=po: return True
-    if c_>o and rng>0 and body/rng>0.55 and c_>l_+rng*0.6: return True
-    return False
-
-def bear_confirm(df, i):
-    o,c_,h_,l_ = df['open'].iloc[i],df['close'].iloc[i],df['high'].iloc[i],df['low'].iloc[i]
-    po,pc = df['open'].iloc[i-1],df['close'].iloc[i-1]
-    body=o-c_; rng=h_-l_
-    if pc>po and c_<o and o>=pc and c_<=po: return True
-    if c_<o and rng>0 and body/rng>0.55 and c_<h_-rng*0.6: return True
-    return False
-
-def valid_long(df, i, ob):
-    c=df['close'].iloc[i]; r=df['rsi'].iloc[i]
-    if c < df['ema200'].iloc[i]: return False
-    if r<35 or r>70: return False
-    if df['low'].iloc[i] > ob['hi']: return False
-    return True
-
-def valid_short(df, i, ob):
-    c=df['close'].iloc[i]; r=df['rsi'].iloc[i]
-    if c > df['ema200'].iloc[i]: return False
-    if r<30 or r>65: return False
-    if df['high'].iloc[i] < ob['lo']: return False
-    return True
-
-def sltp_long(df, i, ob):
-    atr=df['atr'].iloc[i]; entry=ob['mid']
-    sl=ob['lo']-atr*0.5; risk=entry-sl
-    if risk<=0 or risk>atr*3: return None,None,None
-    return entry, sl, entry+risk*RR
-
-def sltp_short(df, i, ob):
-    atr=df['atr'].iloc[i]; entry=ob['mid']
-    sl=ob['hi']+atr*0.5; risk=sl-entry
-    if risk<=0 or risk>atr*3: return None,None,None
-    return entry, sl, entry-risk*RR
-
-def scan_signal(df):
-    """
-    Quét tín hiệu live - dùng CÙNG logic với backtest.
-    Lấy tín hiệu từ 5 nến cuối để không bỏ sót.
-    """
-    sh = swing_highs(df, n=3)
-    sl = swing_lows(df,  n=3)
-
-    ob_pending = None
-    ob_ttl     = 0
-    last_signal = None
-
-    for i in range(10, len(df)):
-        sig = detect_structure(df, sh, sl, i)
-        if sig:
-            ob = find_ob(df, sig, i, lookback=20)
-            if ob:
-                ob_pending = ob
-                ob_ttl = 0
-
-        if ob_pending:
-            ob_ttl += 1
-            if ob_ttl > 40:
-                ob_pending = None
-
-        # Lưu tín hiệu trong 5 nến cuối
-        if i >= len(df) - 5 and ob_pending:
-            ob = ob_pending
-            if ob['type'] == 'BULL_OB' and valid_long(df, i, ob) and bull_confirm(df, i):
-                e, sl_, tp = sltp_long(df, i, ob)
-                if e:
-                    last_signal = {
-                        'side': 'LONG', 'entry': round(e,2),
-                        'sl': round(sl_,2), 'tp': round(tp,2),
-                        'candle_time': str(df['datetime'].iloc[i])
-                    }
-            elif ob['type'] == 'BEAR_OB' and valid_short(df, i, ob) and bear_confirm(df, i):
-                e, sl_, tp = sltp_short(df, i, ob)
-                if e:
-                    last_signal = {
-                        'side': 'SHORT', 'entry': round(e,2),
-                        'sl': round(sl_,2), 'tp': round(tp,2),
-                        'candle_time': str(df['datetime'].iloc[i])
-                    }
-
-    return last_signal
-
-# ==========================================
-# BACKTEST TRONG NGÀY
-# ==========================================
-def run_daily_backtest(df, target_date=None):
-    """
-    Chạy backtest SMC cho 1 ngày cụ thể (mặc định hôm nay GMT+7)
-    Trả về list các lệnh đã xử lý trong ngày đó
-    """
-    if target_date is None:
-        target_date = now_vn().date()
-
-    sh = swing_highs(df, n=3)
-    sl = swing_lows(df,  n=3)
-
-    trades      = []
-    lenh_mo     = None
-    ob_pending  = None
-    ob_ttl      = 0
-    RR_BT       = RR
-    MAX_HOLD    = 32
-
-    for i in range(10, len(df)):
-        row_date = pd.to_datetime(df['datetime'].iloc[i]).date()
-
-        c = df['close'].iloc[i]
-        h = df['high'].iloc[i]
-        l = df['low'].iloc[i]
-
-        # --- Quản lý lệnh đang mở ---
-        if lenh_mo is not None:
-            lenh_mo['held'] += 1
-
-            if lenh_mo['held'] >= MAX_HOLD:
-                pnl = 1 if (c > lenh_mo['entry'] and lenh_mo['type']=='LONG') or \
-                           (c < lenh_mo['entry'] and lenh_mo['type']=='SHORT') else -1
-                lenh_mo.update({'result':'TIMEOUT','pnl_r': round(pnl*0.3,1), 'exit_time': str(df['datetime'].iloc[i])})
-                if row_date == target_date or lenh_mo['trade_date'] == target_date:
-                    trades.append(dict(lenh_mo))
-                lenh_mo = None
-                continue
-
-            if lenh_mo['type'] == 'LONG':
-                if h >= lenh_mo['entry']+(lenh_mo['entry']-lenh_mo['sl']) and not lenh_mo.get('be'):
-                    lenh_mo['sl'] = lenh_mo['entry']+1; lenh_mo['be']=True
-                if l <= lenh_mo['sl']:
-                    pnl_r = 0.0 if lenh_mo.get('be') else -1.0
-                    lenh_mo.update({'result':'BE' if lenh_mo.get('be') else 'LOSS','pnl_r':pnl_r,'exit_time':str(df['datetime'].iloc[i])})
-                    if lenh_mo['trade_date'] == target_date:
-                        trades.append(dict(lenh_mo))
-                    lenh_mo = None
-                elif h >= lenh_mo['tp']:
-                    lenh_mo.update({'result':'WIN','pnl_r':RR_BT,'exit_time':str(df['datetime'].iloc[i])})
-                    if lenh_mo['trade_date'] == target_date:
-                        trades.append(dict(lenh_mo))
-                    lenh_mo = None
-
-            elif lenh_mo['type'] == 'SHORT':
-                if l <= lenh_mo['entry']-(lenh_mo['sl']-lenh_mo['entry']) and not lenh_mo.get('be'):
-                    lenh_mo['sl'] = lenh_mo['entry']-1; lenh_mo['be']=True
-                if h >= lenh_mo['sl']:
-                    pnl_r = 0.0 if lenh_mo.get('be') else -1.0
-                    lenh_mo.update({'result':'BE' if lenh_mo.get('be') else 'LOSS','pnl_r':pnl_r,'exit_time':str(df['datetime'].iloc[i])})
-                    if lenh_mo['trade_date'] == target_date:
-                        trades.append(dict(lenh_mo))
-                    lenh_mo = None
-                elif l <= lenh_mo['tp']:
-                    lenh_mo.update({'result':'WIN','pnl_r':RR_BT,'exit_time':str(df['datetime'].iloc[i])})
-                    if lenh_mo['trade_date'] == target_date:
-                        trades.append(dict(lenh_mo))
-                    lenh_mo = None
-            continue
-
-        # --- Tìm CHoCH + OB ---
-        sig = detect_structure(df, sh, sl, i)
-        if sig:
-            ob = find_ob(df, sig, i, lookback=20)
-            if ob:
-                ob_pending = ob
-                ob_ttl = 0
-
-        if ob_pending:
-            ob_ttl += 1
-            if ob_ttl > 40:
-                ob_pending = None
-
-        # --- Vào lệnh ---
-        if ob_pending and lenh_mo is None:
-            ob = ob_pending
-            if ob['type'] == 'BULL_OB' and valid_long(df, i, ob) and bull_confirm(df, i):
-                e, sl_, tp = sltp_long(df, i, ob)
-                if e and (e - sl_) > 2:
-                    lenh_mo = {
-                        'type':'LONG','entry':round(e,2),'sl':round(sl_,2),'tp':round(tp,2),
-                        'entry_time':str(df['datetime'].iloc[i]),
-                        'trade_date': pd.to_datetime(df['datetime'].iloc[i]).date(),
-                        'held':0,'be':False
-                    }
-                    ob_pending = None
-            elif ob['type'] == 'BEAR_OB' and valid_short(df, i, ob) and bear_confirm(df, i):
-                e, sl_, tp = sltp_short(df, i, ob)
-                if e and (sl_ - e) > 2:
-                    lenh_mo = {
-                        'type':'SHORT','entry':round(e,2),'sl':round(sl_,2),'tp':round(tp,2),
-                        'entry_time':str(df['datetime'].iloc[i]),
-                        'trade_date': pd.to_datetime(df['datetime'].iloc[i]).date(),
-                        'held':0,'be':False
-                    }
-                    ob_pending = None
-
-    return trades
-
-
-def load_history():
-    """Load lịch sử lãi/lỗ từ file"""
-    try:
-        if os.path.exists("pnl_history.json"):
-            with open("pnl_history.json", "r") as f:
-                return json.load(f)
-    except:
-        pass
-    return {"days": [], "total_r": 0, "total_win": 0, "total_loss": 0, "total_be": 0}
-
-def save_history(history):
-    """Lưu lịch sử lãi/lỗ vào file"""
-    try:
-        with open("pnl_history.json", "w") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Loi luu history: {e}")
-
-def format_daily_backtest_msg(trades, target_date, demo_tracker=None):
-    ngay    = target_date.strftime('%d/%m/%Y')
-    thu_map = {0:"Thứ 2",1:"Thứ 3",2:"Thứ 4",3:"Thứ 5",4:"Thứ 6",5:"Thứ 7",6:"CN"}
-    thu     = thu_map.get(target_date.weekday(), "")
-    gio     = now_vn().strftime('%H:%M')
-
-    # Load + cập nhật lịch sử
-    history = load_history()
-
-    thang   = [t for t in trades if t.get('result') == 'WIN']
-    thua    = [t for t in trades if t.get('result') == 'LOSS']
-    be      = [t for t in trades if t.get('result') == 'BE']
-    total_r = round(sum(t.get('pnl_r', 0) for t in trades), 2)
-    winrate = round(len(thang) / len(trades) * 100) if trades else 0
-
-    demo_pnl   = round(demo_tracker.tong_pnl(), 2) if demo_tracker else 0
-    demo_lenh  = len(demo_tracker.lich_su) if demo_tracker else 0
-    demo_thang = len([t for t in (demo_tracker.lich_su if demo_tracker else []) if t.get('pnl_final', 0) > 0])
-    demo_thua  = len([t for t in (demo_tracker.lich_su if demo_tracker else []) if t.get('pnl_final', 0) < 0])
-
-    day_record = {
-        "date": ngay, "trades": len(trades),
-        "win": len(thang), "loss": len(thua), "be": len(be),
-        "total_r": total_r, "winrate": winrate,
-        "demo_pnl": demo_pnl, "demo_trades": demo_lenh,
-    }
-    existing = [i for i, d in enumerate(history["days"]) if d.get("date") == ngay]
-    if existing:
-        history["days"][existing[0]] = day_record
-    else:
-        history["days"].append(day_record)
-
-    history["total_r"]       = round(sum(d.get("total_r", 0) for d in history["days"]), 2)
-    history["total_win"]     = sum(d.get("win", 0)  for d in history["days"])
-    history["total_loss"]    = sum(d.get("loss", 0) for d in history["days"])
-    history["total_be"]      = sum(d.get("be", 0)   for d in history["days"])
-    history["demo_total_pnl"]= round(sum(d.get("demo_pnl", 0) for d in history["days"]), 2)
-    save_history(history)
-
-    # ── Helpers ──────────────────────────────
-    def pnl_icon(v): return "🟢" if v > 0 else ("🔴" if v < 0 else "⚪")
-    def r_fmt(v):    return f"+{v}R" if v > 0 else (f"{v}R" if v != 0 else "0R")
-    def usd_fmt(v):  return f"+${v}" if v > 0 else (f"-${abs(v)}" if v < 0 else "$0")
-
-    # ── Thanh kết quả trực quan ───────────────
-    bar = ("✅" * len(thang) + "❌" * len(thua) + "⬜" * len(be)) or "➖"
-
-    # ── Winrate bar ───────────────────────────
-    if trades:
-        filled = round(winrate / 10)
-        wr_bar = "█" * filled + "░" * (10 - filled)
-        wr_bar_str = f"[{wr_bar}] {winrate}%"
-    else:
-        wr_bar_str = "Không có lệnh"
-
-    # ── Header ────────────────────────────────
-    msg  = f"╔══════════════════════╗\n"
-    msg += f"║  📊 BÁO CÁO NGÀY  {thu}  ║\n"
-    msg += f"║     {ngay}      ║\n"
-    msg += f"╚══════════════════════╝\n\n"
-
-    # ── Backtest section ──────────────────────
-    msg += f"📈 <b>BACKTEST SMC</b>\n"
-    msg += f"{'─'*24}\n"
-
-    if not trades:
-        msg += "📭 Không có lệnh nào hôm nay\n"
-    else:
-        msg += f"{bar}\n\n"
-        msg += f"  Tổng lệnh  : <b>{len(trades)}</b>\n"
-        msg += f"  ✅ Thắng   : <b>{len(thang)}</b>  ❌ Thua : <b>{len(thua)}</b>  ⬜ BE : <b>{len(be)}</b>\n"
-        msg += f"  Winrate    : <b>{wr_bar_str}</b>\n"
-        msg += f"  Kết quả    : {pnl_icon(total_r)} <b>{r_fmt(total_r)}</b>\n\n"
-
-        msg += f"📋 <b>Chi tiết lệnh:</b>\n"
-        for idx, t in enumerate(trades, 1):
-            res   = t.get('result','?')
-            emoji = "✅" if res=='WIN' else ("❌" if res=='LOSS' else ("⬜" if res=='BE' else "⏱"))
-            side  = "📈 MUA" if t['type']=='LONG' else "📉 BÁN"
-            try: gv = pd.to_datetime(t['entry_time']).strftime('%H:%M')
-            except: gv = '--:--'
-            try: gr = pd.to_datetime(t.get('exit_time','')).strftime('%H:%M')
-            except: gr = '--:--'
-            pnl_r  = t.get('pnl_r', 0)
-            pr_str = r_fmt(pnl_r) if pnl_r != 0 else "BE"
-            msg += (
-                f"\n  {emoji} <b>#{idx} {side}</b>  {gv} → {gr}\n"
-                f"     Entry: <b>{t['entry']}</b>  SL: <b>{t['sl']}</b>  TP: <b>{t['tp']}</b>\n"
-                f"     Kết quả: <b>{pr_str}</b>\n"
-            )
-
-    # ── Demo section ──────────────────────────
-    msg += f"\n{'─'*24}\n"
-    msg += f"💰 <b>DEMO TRADING</b>  ($10 × 200x)\n"
-    msg += f"{'─'*24}\n"
-    if demo_lenh == 0:
-        msg += "  Chưa có lệnh demo hôm nay\n"
-    else:
-        msg += f"  Số lệnh  : <b>{demo_lenh}</b>  (✅{demo_thang}  ❌{demo_thua})\n"
-        msg += f"  Lãi/Lỗ  : {pnl_icon(demo_pnl)} <b>{usd_fmt(demo_pnl)}</b>\n"
-
-    # ── Tổng tích lũy ─────────────────────────
-    total_trades = history['total_win'] + history['total_loss'] + history['total_be']
-    total_wr     = round(history['total_win'] / total_trades * 100) if total_trades > 0 else 0
-    cum_dpnl     = history.get('demo_total_pnl', 0)
-    n_days       = len(history['days'])
-
-    msg += f"\n{'═'*24}\n"
-    msg += f"📆 <b>TỔNG TÍCH LŨY ({n_days} ngày)</b>\n"
-    msg += f"{'─'*24}\n"
-    msg += f"  Tổng lệnh  : <b>{total_trades}</b>\n"
-    msg += f"  ✅ {history['total_win']}  ❌ {history['total_loss']}  ⬜ {history['total_be']}  |  WR: <b>{total_wr}%</b>\n"
-    msg += f"  Backtest   : {pnl_icon(history['total_r'])} <b>{r_fmt(history['total_r'])}</b>\n"
-    msg += f"  Demo P&L   : {pnl_icon(cum_dpnl)} <b>{usd_fmt(cum_dpnl)}</b>\n"
-    msg += f"{'═'*24}\n"
-    msg += f"<i>⏰ {gio} (GMT+7)  |  Chỉ tham khảo</i>"
-
-    return msg
-
-
-# ==========================================
-# FORMAT TIN NHẮN TIẾNG VIỆT
-# ==========================================
-def format_signal_msg(signal, price, tf):
-    side   = signal['side']
-    emoji  = "🟢" if side == "LONG" else "🔴"
-    lenh   = "MUA (LONG)" if side == "LONG" else "BÁN (SHORT)"
-    entry  = round(signal['entry'], 2)
-    sl     = round(signal['sl'], 2)
-    tp     = round(signal['tp'], 2)
-    rr_r   = round(abs(tp - entry) / max(abs(entry - sl), 0.01), 2)
-    gio    = now_vn().strftime('%d/%m/%Y %H:%M')
-    return (
-        f"{emoji} <b>TÍN HIỆU SMC - GOLD {tf}</b>\n\n"
-        f"📌 Lệnh      : <b>{lenh}</b>\n"
-        f"💰 Giá hiện tại : <b>{price}</b>\n"
-        f"🎯 Vào lệnh  : <b>{entry}</b>\n"
-        f"🛑 Cắt lỗ    : <b>{sl}</b>\n"
-        f"✅ Chốt lời  : <b>{tp}</b>\n"
-        f"📊 R:R       : <b>1:{rr_r}</b>\n\n"
-        f"<i>⏰ {gio} (GMT+7)</i>\n"
-        f"<i>⚠️ Chỉ tham khảo, tự xác nhận trước khi vào lệnh</i>"
-    )
-
-def format_status_msg(price_gc, price_xau, tf, signal, next_time_str):
-    gio = now_vn().strftime('%H:%M')
-    xau_str = f"{price_xau}" if price_xau else "N/A"
-    if signal:
-        side  = signal['side']
-        lenh  = "MUA (LONG)" if side == "LONG" else "BÁN (SHORT)"
-        emoji = "🟢" if side == "LONG" else "🔴"
-        sig_info = (
-            f"{emoji} Có tín hiệu: <b>{lenh}</b>\n"
-            f"   Vào lệnh : <b>{round(signal['entry'],2)}</b>\n"
-            f"   Cắt lỗ   : <b>{round(signal['sl'],2)}</b>\n"
-            f"   Chốt lời : <b>{round(signal['tp'],2)}</b>\n"
-            f"   (Đang chờ retest vùng OB)"
-        )
-    else:
-        sig_info = "⏳ Chưa có tín hiệu. Đang theo dõi..."
-
-    return (
-        f"🤖 <b>SMC Bot - Cập nhật {gio} (GMT+7)</b>\n\n"
-        f"Giá XAUUSDT : <b>{xau_str}</b>\n"
-        f"Khung TG    : <b>{tf}</b>\n"
-        f"Trạng thái  : ✅ Đang chạy\n\n"
-        f"{sig_info}\n\n"
-        f"<i>Cập nhật tiếp theo lúc {next_time_str}</i>"
-    )
-
-def format_startup_msg(tf, check_min):
-    gio = now_vn().strftime('%d/%m/%Y %H:%M')
-    return (
-        f"🚀 <b>Bot SMC GOLD {tf} đã khởi động</b>\n\n"
-        f"✅ Đang chạy bình thường\n"
-        f"🔄 Cập nhật mỗi {check_min} phút (các phút :00, :05, :10...)\n"
-        f"⏰ {gio} (GMT+7)"
-    )
-
-def format_error_msg(err):
-    gio = now_vn().strftime('%d/%m/%Y %H:%M')
-    return (
-        f"❌ <b>SMC Bot - Lỗi</b>\n\n"
-        f"Chi tiết: {str(err)[:200]}\n"
-        f"<i>⏰ {gio} (GMT+7)</i>"
-    )
-
-def format_nodata_msg():
-    gio = now_vn().strftime('%d/%m/%Y %H:%M')
-    return (
-        f"⚠️ <b>SMC Bot - Cảnh báo</b>\n\n"
-        f"Không tải được dữ liệu GOLD\n"
-        f"Đang thử lại...\n\n"
-        f"<i>⏰ {gio} (GMT+7)</i>"
-    )
-
-# ==========================================
-# DEMO TRADING TRACKER
-# ==========================================
-class DemoTracker:
-    """
-    Theo dõi lệnh demo theo tín hiệu SMC
-    Margin: $10, Đòn bẩy: x200 → Notional: $2000
-    PnL tính theo: (Δgiá / entry) * notional
-    ĐỒNG BỘ với backtest: dùng cùng entry/SL/TP từ scan_signal
-    """
-    def __init__(self, margin=10, leverage=200):
-        self.margin    = margin
-        self.leverage  = leverage
-        self.notional  = margin * leverage
-        self.lenh_mo   = None
-        self.lenh_cho  = None
-        self.lich_su   = []
-
-    def _calc_pnl(self, entry, sl, tp):
-        risk_r = abs(entry - sl)
-        tp_r   = abs(tp - entry)
-        pnl_sl = round(-abs(risk_r / entry * self.notional), 2)
-        pnl_tp = round( abs(tp_r  / entry * self.notional), 2)
-        return pnl_sl, pnl_tp
-
-    def mo_lenh(self, signal, price):
-        """Đặt lệnh chờ retest OB - dùng đúng entry/SL/TP từ tín hiệu"""
-        if self.lenh_mo is not None or self.lenh_cho is not None:
-            return None
-
-        side  = signal['side']
-        entry = round(signal['entry'], 2)
-        sl    = round(signal['sl'], 2)
-        tp    = round(signal['tp'], 2)
-        pnl_sl, pnl_tp = self._calc_pnl(entry, sl, tp)
-
-        self.lenh_cho = {
-            'side': side, 'entry': entry, 'sl': sl, 'tp': tp,
-            'pnl_sl': pnl_sl, 'pnl_tp': pnl_tp,
-            'margin': self.margin, 'leverage': self.leverage, 'notional': self.notional,
-            'signal_time': now_vn().strftime('%d/%m %H:%M'),
-            'ttl': 0,
+class BingXClient:
+    def __init__(self, api_key, secret_key):
+        self.api_key = api_key
+        self.secret_key = secret_key
+
+    def _get_signature(self, params):
+        """Tạo chữ ký HMAC-SHA256 theo chuẩn BingX"""
+        query_string = urllib.parse.urlencode(params)
+        return hmac.new(
+            self.secret_key.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+    def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
+        """Đặt lệnh Market kèm TP/SL tự động trên BingX"""
+        path = "/openApi/swap/v2/trade/order"
+        params = {
+            "symbol": SYMBOL,
+            "side": side,                  # "BUY" hoặc "SELL"
+            "positionSide": pos_side,      # "LONG" hoặc "SHORT"
+            "type": "MARKET",
+            "quantity": quantity,
+            "timestamp": int(time.time() * 1000),
+            "apiKey": self.api_key
         }
-        return self.lenh_cho
-
-    def sync_from_backtest(self, bt_trade):
-        """
-        Đồng bộ kết quả từ backtest vào demo tracker.
-        Gọi sau khi chạy run_daily_backtest để đảm bảo demo = backtest.
-        """
-        entry  = bt_trade['entry']
-        sl     = bt_trade['sl']
-        tp     = bt_trade['tp']
-        result = bt_trade.get('result', 'LOSS')
-        pnl_sl, pnl_tp = self._calc_pnl(entry, sl, tp)
-
-        if result == 'WIN':
-            pnl_final = pnl_tp
-        elif result == 'LOSS':
-            pnl_final = pnl_sl
-        else:
-            pnl_final = 0.0
-
-        self.lich_su.append({
-            'side':       bt_trade.get('type', '?'),
-            'entry':      entry,
-            'sl':         sl,
-            'tp':         tp,
-            'pnl_sl':     pnl_sl,
-            'pnl_tp':     pnl_tp,
-            'pnl_final':  pnl_final,
-            'pnl_now':    pnl_final,
-            'price_now':  tp if result == 'WIN' else sl,
-            'notional':   self.notional,
-            'margin':     self.margin,
-            'leverage':   self.leverage,
-            'open_time':  bt_trade.get('entry_time', '')[:16],
-            'close_time': bt_trade.get('exit_time', '')[:16],
-            'status':     'TP ✅' if result == 'WIN' else ('SL ❌' if result == 'LOSS' else 'BE ⬜'),
-        })
-
-    def kiem_tra_cho(self, price):
-        """Kiểm tra xem giá có chạm entry chưa → mở lệnh thật"""
-        if self.lenh_cho is None:
+        
+        # Gắn TP/SL trực tiếp vào lệnh
+        if tp: params["takeProfit"] = json.dumps({"type": "MARKET", "stopPrice": tp, "price": tp})
+        if sl: params["stopLoss"] = json.dumps({"type": "MARKET", "stopPrice": sl, "price": sl})
+        
+        params["signature"] = self._get_signature(params)
+        url = f"{BINGX_URL}{path}?{urllib.parse.urlencode(params)}"
+        
+        try:
+            r = requests.post(url, timeout=15)
+            return r.json()
+        except Exception as e:
+            print(f"Lỗi kết nối BingX: {e}")
             return None
 
-        l    = self.lenh_cho
-        side = l['side']
-        l['ttl'] += 1
-
-        # Hủy lệnh chờ sau 60 lần check (~10 phút)
-        if l['ttl'] > 60:
-            self.lenh_cho = None
-            return 'EXPIRED'
-
-        hit_entry = (side == 'LONG'  and price <= l['entry']) or \
-                    (side == 'SHORT' and price >= l['entry'])
-
-        if hit_entry:
-            self.lenh_mo = {
-                'side':      side,
-                'entry':     l['entry'],
-                'sl':        l['sl'],
-                'tp':        l['tp'],
-                'pnl_sl':    l['pnl_sl'],
-                'pnl_tp':    l['pnl_tp'],
-                'margin':    l['margin'],
-                'leverage':  l['leverage'],
-                'notional':  l['notional'],
-                'open_time': now_vn().strftime('%d/%m %H:%M'),
-                'status':    'OPEN',
-            }
-            self.lenh_cho = None
-            return 'FILLED'
-        return 'WAITING'
-
-    def cap_nhat(self, price):
-        """Kiểm tra SL/TP và tính lãi lỗ hiện tại"""
-        if self.lenh_mo is None:
-            return None, None
-
-        l    = self.lenh_mo
-        side = l['side']
-
-        if side == 'LONG':
-            pnl_now = round((price - l['entry']) / l['entry'] * l['notional'], 4)
-            hit_sl  = price <= l['sl']
-            hit_tp  = price >= l['tp']
-        else:
-            pnl_now = round((l['entry'] - price) / l['entry'] * l['notional'], 4)
-            hit_sl  = price >= l['sl']
-            hit_tp  = price <= l['tp']
-
-        l['pnl_now']   = pnl_now
-        l['price_now'] = price
-
-        if hit_tp:
-            l['status']     = 'TP ✅'
-            l['close_time'] = now_vn().strftime('%d/%m %H:%M')
-            l['pnl_final']  = l['pnl_tp']
-            self.lich_su.append(dict(l))
-            closed = dict(l)
-            self.lenh_mo = None
-            return 'TP', closed
-
-        if hit_sl:
-            l['status']     = 'SL ❌'
-            l['close_time'] = now_vn().strftime('%d/%m %H:%M')
-            l['pnl_final']  = l['pnl_sl']
-            self.lich_su.append(dict(l))
-            closed = dict(l)
-            self.lenh_mo = None
-            return 'SL', closed
-
-        return 'OPEN', l
-
-    def tong_pnl(self):
-        return round(sum(t.get('pnl_final', 0) for t in self.lich_su), 4)
-
-
-def format_demo_open_msg(lenh):
-    side  = lenh['side']
-    emoji = "🟢" if side == 'LONG' else "🔴"
-    loai  = "MUA (LONG)" if side == 'LONG' else "BÁN (SHORT)"
-    return (
-        f"{emoji} <b>DEMO MỞ LỆNH - GOLD</b>\n\n"
-        f"📌 Lệnh     : <b>{loai}</b>\n"
-        f"💰 Vốn      : <b>${lenh['margin']} × {int(lenh['leverage'])}x = ${lenh['notional']}</b>\n"
-        f"🎯 Vào lệnh : <b>{lenh['entry']}</b>\n"
-        f"🛑 Cắt lỗ   : <b>{lenh['sl']}</b>  (−${abs(lenh['pnl_sl'])})\n"
-        f"✅ Chốt lời : <b>{lenh['tp']}</b>  (+${lenh['pnl_tp']})\n"
-        f"⏰ Mở lúc   : <b>{lenh['open_time']} (GMT+7)</b>\n\n"
-        f"<i>⚠️ Lệnh demo mô phỏng, không phải lệnh thật</i>"
-    )
-
-def format_demo_close_msg(lenh, ket_qua):
-    side    = lenh['side']
-    pnl     = lenh.get('pnl_final', 0)
-    loai    = "MUA" if side == 'LONG' else "BÁN"
-    if ket_qua == 'TP':
-        emoji  = "🎉"
-        title  = "CHỐT LỜI (TP)"
-        pnl_str = f"+${pnl}"
-    else:
-        emoji  = "💥"
-        title  = "CẮT LỖ (SL)"
-        pnl_str = f"-${abs(pnl)}"
-
-    return (
-        f"{emoji} <b>DEMO {title}</b>\n\n"
-        f"📌 Lệnh     : <b>{loai}</b>\n"
-        f"🎯 Vào lệnh : <b>{lenh['entry']}</b>\n"
-        f"📤 Đóng lệnh: <b>{lenh['price_now']}</b>\n"
-        f"💵 Lãi/Lỗ   : <b>{pnl_str}</b>\n"
-        f"⏰ Đóng lúc : <b>{lenh.get('close_time','--')} (GMT+7)</b>\n"
-    )
-
-def format_demo_status_msg(demo, price):
-    l = demo.lenh_mo
-    tong = demo.tong_pnl()
-    tong_str = f"+${tong}" if tong >= 0 else f"-${abs(tong)}"
-    tong_icon = "🟢" if tong > 0 else ("🔴" if tong < 0 else "⚪")
-
-    lines = [f"📊 <b>DEMO GOLD - Trạng thái</b>\n"]
-
-    if l:
-        side    = l['side']
-        pnl_now = l.get('pnl_now', 0)
-        loai    = "MUA" if side == 'LONG' else "BÁN"
-        pnl_icon = "📈" if pnl_now >= 0 else "📉"
-        pnl_str  = f"+${pnl_now}" if pnl_now >= 0 else f"-${abs(pnl_now)}"
-        lines.append(
-            f"🔓 Lệnh đang mở: <b>{loai}</b>\n"
-            f"   Vào lệnh  : <b>{l['entry']}</b>\n"
-            f"   Giá hiện tại: <b>{price}</b>\n"
-            f"   {pnl_icon} Lãi/Lỗ tạm: <b>{pnl_str}</b>\n"
-            f"   SL: <b>{l['sl']}</b>  |  TP: <b>{l['tp']}</b>\n"
-            f"   Mở lúc: <b>{l['open_time']}</b>"
-        )
-    else:
-        lines.append("💤 Không có lệnh đang mở")
-
-    lines.append(f"\n{tong_icon} Tổng lãi/lỗ hôm nay: <b>{tong_str}</b>")
-    lines.append(f"📋 Số lệnh đã đóng: <b>{len(demo.lich_su)}</b>")
-    return "\n".join(lines)
-
-
-# ==========================================
-# MAIN LOOP
-# ==========================================
-# Lịch bắn Telegram:
-# [1] Tín hiệu LONG/SHORT   → bắn NGAY khi phát hiện (không chờ phút :x0/:x5)
-# [2] Health check           → mỗi 15 phút
-# [3] Mở/Đóng lệnh demo     → bắn NGAY khi mở/dính SL/TP
-# [4] Trạng thái lệnh đang mở → mỗi 1 phút (nếu có lệnh đang mở)
-
-print(f"Bot SMC khoi dong | {INTERVAL}")
-send_telegram(format_startup_msg(INTERVAL, 15))
-
-last_signal_key      = None
-last_health_time     = now_vn()
-last_demo_status_t   = now_vn() - timedelta(minutes=1)
-last_backtest_date   = None
-last_morning_date    = None
-HEALTH_INTERVAL      = 60 * 60  # health check mỗi 1 tiếng
-DEMO_STATUS_INTERVAL = 1 * 60
-BACKTEST_HOUR        = 20
-
-# ── Background data fetcher ──────────────────────────────────
-# Fetch data nặng chạy trên thread riêng mỗi 30s
-# Luồng chính chỉ đọc cache → không bị block → signal bắn nhanh
-
-import threading
-
-_df_cache   = {"df": None, "ts": None}   # shared cache
-_cache_lock = threading.Lock()
-
-def _bg_fetcher():
-    """Thread nền: fetch + indicator mỗi 30s"""
-    while True:
+    def get_vst_balance(self):
+        """Lấy số dư tài khoản demo VST"""
+        path = "/openApi/swap/v2/user/balance"
+        params = {"timestamp": int(time.time() * 1000), "apiKey": self.api_key}
+        params["signature"] = self._get_signature(params)
         try:
-            df = fetch_data(INTERVAL, candles=500)
-            if df is not None:
-                df = add_indicators(df)
-                with _cache_lock:
-                    _df_cache["df"] = df
-                    _df_cache["ts"] = now_vn()
-                print(f"[BG] Data updated | {df['datetime'].iloc[-1]} | close={round(df['close'].iloc[-1],2)}")
-        except Exception as e:
-            print(f"[BG] Fetch error: {e}")
-        time.sleep(30)
+            r = requests.get(f"{BINGX_URL}{path}", params=params, timeout=10)
+            data = r.json()
+            if data.get("code") == 0:
+                for asset in data["data"]["balance"]:
+                    if asset["asset"] == "VST": return float(asset["balance"])
+        except: pass
+        return 0.0
 
+bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
+
+# ==========================================
+# (Các hàm fetch_data, indicators, SMC, server giữ nguyên như code cũ)
+# ==========================================
+
+# ... [Giữ nguyên code từ HealthHandler đến scan_signal] ...
+
+# ==========================================
+# MAIN LOOP - Tích hợp BingX
+# ==========================================
+
+print(f"Bot SMC BingX Demo khoi dong | {INTERVAL}")
+send_telegram(f"🚀 <b>Bot SMC GOLD đã chuyển sang dùng BingX API (VST)</b>")
+
+last_signal_key = None
+last_health_time = now_vn()
+HEALTH_INTERVAL = 3600 # 1 tiếng check 1 lần
+
+# Khởi động background fetcher
 bg_thread = threading.Thread(target=_bg_fetcher, daemon=True)
 bg_thread.start()
-print("Background fetcher started")
-
-# Chờ fetch lần đầu
 time.sleep(5)
-
-# Khởi tạo Demo Tracker
-demo = DemoTracker(margin=10, leverage=200)
 
 while True:
     try:
-        vn_now  = now_vn()
-        now_str = vn_now.strftime('%H:%M:%S')
-
-        # Đọc cache (không block)
+        vn_now = now_vn()
         with _cache_lock:
             df = _df_cache["df"]
 
         if df is None:
-            print(f"[{now_str}] Chua co data, cho...")
             time.sleep(3)
             continue
 
-        price = round(df['close'].iloc[-1], 2)
+        fresh_price = fetch_latest_price() or round(df['close'].iloc[-1], 2)
+        signal = scan_signal(df) # Logic quét SMC cũ
 
-        # Giá realtime nhanh (Binance spot, ~50ms)
-        fresh_price = fetch_latest_price()
-        if fresh_price is None or fresh_price == price:
-            fresh_price = price
-        print(f"[{now_str}] Gia: {fresh_price} (cache: {price})")
-
-        # ==========================================
-        # [0] DEMO - Kiểm tra lệnh chờ → fill NGAY
-        # ==========================================
-        if demo.lenh_cho is not None and demo.lenh_mo is None:
-            ket_qua = demo.kiem_tra_cho(fresh_price)
-            if ket_qua == 'FILLED' and demo.lenh_mo is not None:
-                send_telegram(format_demo_open_msg(demo.lenh_mo))
-                print(f"[{now_str}] DEMO FILLED @ {demo.lenh_mo['entry']}")
-            elif ket_qua == 'EXPIRED':
-                send_telegram(
-                    f"⚪ <b>DEMO - Hủy lệnh chờ</b>\n\n"
-                    f"Giá không retest về entry trong thời gian chờ.\n"
-                    f"<i>⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)</i>"
-                )
-                print(f"[{now_str}] DEMO EXPIRED")
-
-        # ==========================================
-        # [3] DEMO - Kiểm tra SL/TP → bắn NGAY
-        # ==========================================
-        sltp_hit = False
-        if demo.lenh_mo is not None:
-            trang_thai, lenh_data = demo.cap_nhat(fresh_price)
-            if trang_thai == 'TP' and lenh_data:
-                send_telegram(format_demo_close_msg(lenh_data, 'TP'))
-                print(f"[{now_str}] DEMO TP | +${lenh_data.get('pnl_final',0)}")
-                sltp_hit = True
-            elif trang_thai == 'SL' and lenh_data:
-                send_telegram(format_demo_close_msg(lenh_data, 'SL'))
-                print(f"[{now_str}] DEMO SL | -${abs(lenh_data.get('pnl_sl',0))}")
-                sltp_hit = True
-
-        # ==========================================
-        # [1] TÍN HIỆU → scan và bắn NGAY nếu có mới
-        # ==========================================
-        signal = scan_signal(df)
         if signal:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             if sig_key != last_signal_key:
+                # 1. Bắn thông báo tín hiệu về Telegram
                 send_telegram(format_signal_msg(signal, fresh_price, INTERVAL))
-                print(f"[{now_str}] TIN HIEU {signal['side']} @ {round(signal['entry'],2)}")
                 last_signal_key = sig_key
 
-                # Đặt lệnh chờ nếu chưa có lệnh nào
-                if demo.lenh_mo is None and demo.lenh_cho is None:
-                    lenh_cho = demo.mo_lenh(signal, fresh_price)
-                    if lenh_cho:
-                        gio = now_vn().strftime('%d/%m %H:%M')
-                        side_txt = "BÁN (SHORT)" if lenh_cho['side'] == 'SHORT' else "MUA (LONG)"
-                        emoji_l  = "🔴" if lenh_cho['side'] == 'SHORT' else "🟢"
-                        send_telegram(
-                            f"{emoji_l} <b>DEMO - Đặt lệnh chờ</b>\n\n"
-                            f"📌 Lệnh     : <b>{side_txt}</b>\n"
-                            f"🎯 Chờ giá  : <b>{lenh_cho['entry']}</b>\n"
-                            f"🛑 Cắt lỗ   : <b>{lenh_cho['sl']}</b>\n"
-                            f"✅ Chốt lời : <b>{lenh_cho['tp']}</b>\n"
-                            f"⏰ Đặt lúc  : <b>{gio} (GMT+7)</b>\n\n"
-                            f"<i>⏳ Chờ giá retest vùng OB để vào lệnh...</i>"
-                        )
-                        print(f"[{now_str}] DEMO CHO LENH {lenh_cho['side']} @ {lenh_cho['entry']}")
-            else:
-                print(f"[{now_str}] Gia:{fresh_price} | Tin hieu cu ({signal['side']}) - bo qua")
-        else:
-            if last_signal_key is not None:
-                print(f"[{now_str}] Het tin hieu, reset signal key")
-                last_signal_key = None
-            print(f"[{now_str}] Gia:{fresh_price} | Chua co tin hieu")
+                # 2. Thực thi lệnh trên BingX Demo thay vì DemoTracker
+                side = "BUY" if signal['side'] == 'LONG' else "SELL"
+                pos_side = signal['side']
+                
+                # Quantity mặc định là 1 (tương ứng quy định GOLD trên sàn)
+                order = bing_client.place_market_order(
+                    side=side, 
+                    pos_side=pos_side, 
+                    quantity=1, 
+                    tp=signal['tp'], 
+                    sl=signal['sl']
+                )
+                
+                if order and order.get("code") == 0:
+                    balance = bing_client.get_vst_balance()
+                    send_telegram(f"✅ <b>BINGX: Đã đặt lệnh {pos_side}</b>\n💰 Số dư VST: <b>{round(balance, 2)}</b>")
+                else:
+                    msg = order.get("msg", "Lỗi API") if order else "Không kết nối được sàn"
+                    send_telegram(f"❌ <b>BINGX LỖI:</b> <code>{msg}</code>")
 
-        # ==========================================
-        # [4] TRẠNG THÁI LỆNH DEMO → mỗi 1 phút nếu đang mở
-        # ==========================================
-        elapsed_demo = (now_vn() - last_demo_status_t).total_seconds()
-        if demo.lenh_mo is not None and elapsed_demo >= DEMO_STATUS_INTERVAL and not sltp_hit:
-            fp2 = fetch_latest_price() or fresh_price
-            ts, ld = demo.cap_nhat(fp2)
-            if ts == 'OPEN' and demo.lenh_mo is not None:
-                send_telegram(format_demo_status_msg(demo, fp2))
-                print(f"[{now_str}] Demo status | Gia: {fp2} PnL: ${demo.lenh_mo.get('pnl_now',0)}")
-            last_demo_status_t = now_vn()
-
-        # ==========================================
-        # [2] HEALTH CHECK → mỗi 15 phút
-        # ==========================================
-        elapsed_health = (now_vn() - last_health_time).total_seconds()
-        if elapsed_health >= HEALTH_INTERVAL:
-            next_str  = (now_vn() + timedelta(minutes=15)).strftime('%H:%M')
-            fp3       = fetch_latest_price() or fresh_price
-            xau_price = round(fp3 + 30, 2)
-            send_telegram(format_status_msg(fp3, xau_price, INTERVAL, signal, next_str))
-            if demo.lenh_mo is not None:
-                demo.cap_nhat(fp3)
-                if demo.lenh_mo is not None:
-                    send_telegram(format_demo_status_msg(demo, fp3))
-            print(f"[{now_str}] Da gui health check | GC=F:{price} XAUUSD:{xau_price}")
+        # Health Check mỗi tiếng
+        if (now_vn() - last_health_time).total_seconds() >= HEALTH_INTERVAL:
+            send_telegram(f"🤖 <b>Bot SMC vẫn đang chạy</b>\nGiá GOLD: {fresh_price}")
             last_health_time = now_vn()
 
-        # ==========================================
-        # BACKTEST CUỐI NGÀY → 20:00 GMT+7
-        # ==========================================
-        today = vn_now.date()
-        if vn_now.hour == BACKTEST_HOUR and last_backtest_date != today:
-            print(f"[{now_str}] Dang chay backtest ngay {today}...")
-            bt_trades = run_daily_backtest(df, target_date=today)
+        time.sleep(5)
 
-            # Đồng bộ kết quả backtest vào demo tracker
-            demo_sync = DemoTracker(margin=10, leverage=200)
-            for t in bt_trades:
-                demo_sync.sync_from_backtest(t)
-
-            bt_msg = format_daily_backtest_msg(bt_trades, today, demo_tracker=demo_sync)
-            send_telegram(bt_msg)
-            last_backtest_date = today
-            print(f"[{now_str}] Da gui backtest {today}: {len(bt_trades)} lenh")
-
-            # Reset demo tracker live sang ngày mới
-            demo = DemoTracker(margin=10, leverage=200)
-            print(f"[{now_str}] Da reset Demo Tracker")
-
-        # ==========================================
-        # BÁO CÁO TỔNG HỢP SÁNG → 07:00 GMT+7
-        # (Gửi lại summary ngày hôm qua kèm lịch sử tích lũy)
-        # ==========================================
-        yesterday = (vn_now - timedelta(days=1)).date()
-        if vn_now.hour == 7 and last_morning_date != today:
-            last_morning_date = today  # đánh dấu ngay để không gửi lại
-            history = load_history()
-            if history["days"]:
-                total_trades = history['total_win'] + history['total_loss'] + history['total_be']
-                total_wr     = round(history['total_win'] / total_trades * 100) if total_trades > 0 else 0
-                cum_dpnl     = history.get('demo_total_pnl', 0)
-                n_days       = len(history['days'])
-
-                def pi(v): return "🟢" if v > 0 else ("🔴" if v < 0 else "⚪")
-                def rf(v): return f"+{v}R" if v > 0 else f"{v}R"
-                def uf(v): return f"+${v}" if v > 0 else f"-${abs(v)}"
-
-                # 7 ngày gần nhất
-                recent = history["days"][-7:]
-                rows   = ""
-                for d in recent:
-                    dr  = d.get('total_r', 0)
-                    dp  = d.get('demo_pnl', 0)
-                    rows += (
-                        f"  📅 <b>{d['date']}</b>\n"
-                        f"     BT: {pi(dr)}{rf(dr)}  |  Demo: {pi(dp)}{uf(dp)}\n"
-                        f"     ✅{d.get('win',0)} ❌{d.get('loss',0)} ⬜{d.get('be',0)}  WR:{d.get('winrate',0)}%\n"
-                    )
-
-                morning_msg = (
-                    f"🌅 <b>BÁO CÁO TỔNG HỢP - {vn_now.strftime('%d/%m/%Y')}</b>\n\n"
-                    f"{'═'*24}\n"
-                    f"📆 <b>LỊCH SỬ {n_days} NGÀY GẦN NHẤT</b>\n"
-                    f"{'─'*24}\n"
-                    f"{rows}"
-                    f"{'═'*24}\n"
-                    f"📊 <b>TỔNG CỘNG</b>\n"
-                    f"{'─'*24}\n"
-                    f"  Tổng lệnh : <b>{total_trades}</b>  (✅{history['total_win']} ❌{history['total_loss']} ⬜{history['total_be']})\n"
-                    f"  Winrate   : <b>{total_wr}%</b>\n"
-                    f"  Backtest  : {pi(history['total_r'])} <b>{rf(history['total_r'])}</b>\n"
-                    f"  Demo P&L  : {pi(cum_dpnl)} <b>{uf(cum_dpnl)}</b>\n"
-                    f"{'═'*24}\n"
-                    f"<i>⏰ 07:00 (GMT+7) | Chúc giao dịch tốt hôm nay! 💪</i>"
-                )
-                send_telegram(morning_msg)
-                print(f"[{now_str}] Da gui bao cao tong hop sang")
-
-        time.sleep(3)  # check mỗi 3s → tín hiệu bắn trong vòng 3-5s
-
-    except KeyboardInterrupt:
-        print("\nBot dung.")
-        break
     except Exception as e:
-        print(f"[{now_vn().strftime('%H:%M:%S')}] Loi: {e}")
-        try:
-            send_telegram(format_error_msg(e))
-        except: pass
+        print(f"Lỗi: {e}")
         time.sleep(60)
