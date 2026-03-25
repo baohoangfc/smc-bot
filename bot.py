@@ -54,6 +54,18 @@ def format_price(value):
         return "N/A"
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
 
+def pick_first_float(*values):
+    for val in values:
+        if val is None:
+            continue
+        try:
+            num = float(val)
+            if num > 0:
+                return num
+        except Exception:
+            continue
+    return None
+
 def format_vn_time(dt_value, fmt="%d/%m/%Y %H:%M"):
     dt = pd.to_datetime(dt_value)
     return dt.strftime(fmt)
@@ -192,10 +204,18 @@ class BingXClient:
                     continue
                 side = "LONG" if qty > 0 else "SHORT"
                 entry = float(p.get("avgPrice", 0) or 0)
+                tp = pick_first_float(
+                    p.get("takeProfit"), p.get("takeProfitPrice"), p.get("tpPrice"), p.get("tp")
+                )
+                sl = pick_first_float(
+                    p.get("stopLoss"), p.get("stopLossPrice"), p.get("slPrice"), p.get("sl")
+                )
                 return {
                     "side": side,
                     "entry": entry,
                     "quantity": abs(qty),
+                    "tp": tp,
+                    "sl": sl,
                     "opened_at": now_vn(),
                     "unrealizedProfit": float(p.get("unrealizedProfit", 0) or 0),
                     "positionValue": float(p.get("positionValue", 0) or 0),
@@ -482,10 +502,14 @@ def format_pnl_msg(position, last_price):
     pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
     price_to_show = position.get("markPrice") or last_price
+    tp_text = format_price(position.get("tp")) if position.get("tp") is not None else "Chưa có"
+    sl_text = format_price(position.get("sl")) if position.get("sl") is not None else "Chưa có"
     return (
         f"{pnl_emoji} <b>Theo dõi lệnh mỗi 1 phút</b>\n\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
+        f"🛑 Cắt lỗ    : <b>{sl_text}</b>\n"
+        f"✅ Chốt lời  : <b>{tp_text}</b>\n"
         f"💰 Giá hiện tại: <b>{format_price(price_to_show)}</b>\n"
         f"📦 Khối lượng : <b>{qty}</b>\n"
         f"💵 PnL tạm tính: <b>{pnl:+.2f} USDT ({pnl_pct:+.2f}%)</b>\n"
@@ -567,6 +591,8 @@ while True:
                         "side": signal["side"],
                         "entry": fill_price,
                         "quantity": float(quantity),
+                        "tp": order_signal.get("tp"),
+                        "sl": order_signal.get("sl"),
                         "opened_at": now_vn()
                     }
                     last_pnl_notify_ts = 0
@@ -586,6 +612,10 @@ while True:
                     last_pnl_notify_ts = now_ts
                     time.sleep(10)
                     continue
+                if exchange_pos.get("tp") is None:
+                    exchange_pos["tp"] = active_position.get("tp")
+                if exchange_pos.get("sl") is None:
+                    exchange_pos["sl"] = active_position.get("sl")
                 active_position = exchange_pos
                 send_telegram(format_pnl_msg(active_position, float(live_price)))
                 last_pnl_notify_ts = now_ts
