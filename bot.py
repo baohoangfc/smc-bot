@@ -41,6 +41,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
 BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 BINGX_URL        = "https://open-api-vst.bingx.com"
+DATA_SOURCE      = "BINGX"
 SYMBOL           = os.environ.get("BINGX_SYMBOL", "NCCOGOLD2USD-USDT")
 INTERVAL         = os.environ.get("INTERVAL", "15m")
 RR               = float(os.environ.get("RR", "2.0"))
@@ -55,6 +56,8 @@ SCALP_RR_MAX = float(os.environ.get("SCALP_RR_MAX", "1.8"))
 SL_BUFFER_PCT = float(os.environ.get("SL_BUFFER_PCT", "0.08"))
 SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", "6"))
 MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.15"))
+MIN_ATR_PCT = float(os.environ.get("MIN_ATR_PCT", "0.03"))
+TREND_LOOKBACK = int(os.environ.get("TREND_LOOKBACK", "20"))
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -545,14 +548,17 @@ bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 # (Các hàm fetch_data, indicators, SMC Logic giữ nguyên)
 # ==========================================
 def fetch_data(interval="15m", candles=500):
+    # Dữ liệu nến dùng cho tín hiệu chỉ lấy từ API BingX (không dùng Yahoo/nguồn khác).
     try:
         return bing_client.get_klines(interval=interval, limit=candles)
     except Exception:
         return None
 
 def add_indicators(df):
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
     df['atr'] = (df['high'] - df['low']).ewm(span=14, adjust=False).mean()
+    df['atr_pct'] = (df['atr'] / df['close']) * 100
     return df
 
 def calc_scalp_tp_sl(df, side, entry):
@@ -586,11 +592,53 @@ def calc_scalp_tp_sl(df, side, entry):
     return round(tp, 2), round(sl, 2), rr_used
 
 def scan_signal(df):
-    # Chỉ dùng nến đã đóng để tránh spam noti khi nến hiện tại còn chạy.
-    if len(df) < 6: return None
+    """
+    Tín hiệu scalp SMC được siết chặt:
+    1) Có bias rõ ràng theo EMA50/EMA200 + cấu trúc gần nhất.
+    2) Có sweep thanh khoản (quét đỉnh/đáy swing gần nhất).
+    3) Có MSS (close phá cấu trúc ngược lại sau sweep).
+    4) ATR tối thiểu để tránh vùng nhiễu quá thấp.
+    """
+    min_bars = max(220, SWING_LOOKBACK + TREND_LOOKBACK + 5)
+    if len(df) < min_bars:
+        return None
+
     last_closed = df.iloc[-2]
-    if last_closed['close'] > df['ema200'].iloc[-2]: # Giả định tín hiệu Long đơn giản
-        e = round(float(last_closed['close']), 2)
+    prev_closed = df.iloc[-3]
+    recent = df.iloc[-(SWING_LOOKBACK + 3):-2]
+    if len(recent) < SWING_LOOKBACK:
+        return None
+
+    atr_pct = float(df['atr_pct'].iloc[-2]) if 'atr_pct' in df.columns and not pd.isna(df['atr_pct'].iloc[-2]) else 0.0
+    if atr_pct < MIN_ATR_PCT:
+        return None
+
+    swing_high = float(recent['high'].max())
+    swing_low = float(recent['low'].min())
+    dealing_range_mid = (swing_high + swing_low) / 2.0
+
+    # HTF bias mô phỏng bằng EMA + cấu trúc gần nhất để giảm lệnh ngược xu hướng.
+    ema50 = float(df['ema50'].iloc[-2])
+    ema200 = float(df['ema200'].iloc[-2])
+    recent_trend_high = float(df['high'].iloc[-(TREND_LOOKBACK + 2):-2].max())
+    recent_trend_low = float(df['low'].iloc[-(TREND_LOOKBACK + 2):-2].min())
+    close_price = float(last_closed['close'])
+
+    bullish_bias = ema50 > ema200 and close_price > ema50 and close_price > recent_trend_low
+    bearish_bias = ema50 < ema200 and close_price < ema50 and close_price < recent_trend_high
+
+    # Sweep + MSS logic
+    liquidity_sweep_low = float(last_closed['low']) < swing_low and close_price > swing_low
+    liquidity_sweep_high = float(last_closed['high']) > swing_high and close_price < swing_high
+    mss_bull = close_price > float(prev_closed['high'])
+    mss_bear = close_price < float(prev_closed['low'])
+
+    # Discount/Premium entry filter (SMC dealing range)
+    in_discount = close_price <= dealing_range_mid
+    in_premium = close_price >= dealing_range_mid
+
+    if bullish_bias and liquidity_sweep_low and mss_bull and in_discount:
+        e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "LONG", e)
         if tp is None or sl is None:
             return None
@@ -602,6 +650,21 @@ def scan_signal(df):
             'rr': rr_used,
             'candle_time': str(last_closed['datetime'])
         }
+
+    if bearish_bias and liquidity_sweep_high and mss_bear and in_premium:
+        e = round(close_price, 2)
+        tp, sl, rr_used = calc_scalp_tp_sl(df, "SHORT", e)
+        if tp is None or sl is None:
+            return None
+        return {
+            'side': 'SHORT',
+            'entry': e,
+            'sl': sl,
+            'tp': tp,
+            'rr': rr_used,
+            'candle_time': str(last_closed['datetime'])
+        }
+
     return None
 
 def get_vst_balance_text():
@@ -630,6 +693,7 @@ def format_signal_msg(signal, order_label=None):
         f"✅ Chốt lời  : <b>{format_price(signal['tp'])}</b>\n"
         f"📊 R:R       : <b>{rr_text}</b>\n\n"
         f"💵 Số dư VST : <b>{get_vst_balance_text()}</b>\n"
+        f"🔌 Nguồn dữ liệu: <b>{DATA_SOURCE}</b>\n"
         f"⏰ <b>{format_vn_time(signal['candle_time'])} (GMT+7)</b>\n"
         "⚠️ <i>Chỉ tham khảo, tự xác nhận trước khi vào lệnh</i>"
     )
@@ -640,6 +704,7 @@ def format_status_msg(last_price, candle_time):
         f"🤖 <b>SMC Bot - Cập nhật {format_vn_time(candle_time, '%H:%M')} (GMT+7)</b>\n\n"
         f"Giá {SYMBOL} : <b>{format_price(last_price)}</b>\n"
         f"Khung TG    : <b>{INTERVAL}</b>\n"
+        f"Nguồn dữ liệu: <b>{DATA_SOURCE}</b>\n"
         f"Số dư VST   : <b>{get_vst_balance_text()}</b>\n"
         "Trạng thái  : ✅ <b>Đang chạy</b>\n\n"
         "⏳ Chưa có tín hiệu. Đang theo dõi...\n\n"
