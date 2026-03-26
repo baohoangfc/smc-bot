@@ -486,6 +486,34 @@ class BingXClient:
     def place_limit_order(self, side, pos_side, quantity, price, tp=None, sl=None):
         return self.place_order(side, pos_side, quantity, "LIMIT", price, tp, sl)
 
+    def close_position_market(self, pos_side, quantity=None):
+        """
+        Đóng vị thế theo market cho đúng chiều positionSide.
+        Trả về response API để caller tự xử lý thành công/thất bại.
+        """
+        try:
+            close_side = "SELL" if pos_side == "LONG" else "BUY"
+            qty = quantity
+            if qty is None or float(qty) <= 0:
+                cur = self.get_open_position()
+                if not cur or cur.get("side") != pos_side:
+                    return {"code": -1, "msg": "Không tìm thấy vị thế phù hợp để đóng"}
+                qty = cur.get("quantity", 0)
+
+            params = {
+                "symbol": SYMBOL,
+                "side": close_side,
+                "positionSide": pos_side,
+                "type": "MARKET",
+                "quantity": round(float(qty), 4),
+                "timestamp": int(time.time() * 1000),
+                "recvWindow": 5000
+            }
+            return self._signed_request("POST", "/openApi/swap/v2/trade/order", params, timeout=15)
+        except Exception as e:
+            print(f"[WARN] close_position_market exception: {e}")
+            return {"code": -1, "msg": str(e)}
+
     def add_missing_tp_sl(self, pos_side, tp=None, sl=None):
         """
         Nếu vị thế hiện tại chưa có TP/SL trên sàn thì đặt bổ sung ngay.
@@ -861,13 +889,18 @@ while True:
             if sig_key != last_signal_key:
                 removable_positions = decide_positions_to_close(active_positions, signal["side"], float(live_price))
                 for pos in removable_positions:
-                    active_positions = [x for x in active_positions if x.get("label") != pos.get("label")]
                     pnl_snapshot = calc_live_pnl(pos, float(live_price))
+                    close_resp = bing_client.close_position_market(pos.get("side"), pos.get("quantity"))
+                    close_ok = close_resp and close_resp.get("code") == 0
+                    if close_ok:
+                        active_positions = [x for x in active_positions if x.get("label") != pos.get("label")]
                     send_telegram(
                         "🔄 <b>Điều chỉnh danh mục lệnh</b>\n"
                         f"Đóng theo phân tích: <b>{pos.get('label')}</b> ({pos.get('side')})\n"
+                        f"Kết quả đóng lệnh: <b>{'Thành công' if close_ok else 'Thất bại'}</b>\n"
                         f"PnL tạm tính khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>\n"
-                        f"Lý do: ưu tiên tín hiệu mới {signal['side']} và giữ tối đa {MAX_ACTIVE_ORDERS} lệnh."
+                        f"Lý do: ưu tiên tín hiệu mới {signal['side']} và giữ tối đa {MAX_ACTIVE_ORDERS} lệnh.\n"
+                        f"Chi tiết API: <b>{(close_resp or {}).get('msg', 'N/A')}</b>"
                     )
                 if len(active_positions) >= MAX_ACTIVE_ORDERS:
                     print("[INFO] Đã đạt tối đa số lệnh giữ, bỏ qua tín hiệu mới.")
