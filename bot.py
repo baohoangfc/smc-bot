@@ -699,7 +699,7 @@ def format_signal_msg(signal, order_label=None):
     )
 
 def format_status_msg(last_price, candle_time):
-    next_time = pd.to_datetime(candle_time) + timedelta(minutes=interval_to_minutes(INTERVAL))
+    next_time = now_vn() + timedelta(hours=1)
     return (
         f"🤖 <b>SMC Bot - Cập nhật {format_vn_time(candle_time, '%H:%M')} (GMT+7)</b>\n\n"
         f"Giá {SYMBOL} : <b>{format_price(last_price)}</b>\n"
@@ -835,7 +835,7 @@ if not active_positions:
 send_telegram(format_startup_msg(vst_bal))
 
 last_signal_key = None
-last_status_candle = None
+last_status_notify_ts = time.time()
 last_pnl_notify_ts = 0
 bootstrapped_signal = False
 while True:
@@ -943,9 +943,9 @@ while True:
                         f"🆔 Mã lệnh: <b>{order_label}</b>\n"
                         f"Lý do: <b>{err_msg}</b>"
                     )
-        elif candle_time != last_status_candle:
+        elif (not active_positions) and (time.time() - last_status_notify_ts >= 3600):
             send_telegram(format_status_msg(live_price, candle_time))
-            last_status_candle = candle_time
+            last_status_notify_ts = time.time()
 
         # Nếu đã vào lệnh, gửi noti lời/lỗ mỗi 1 phút cho từng lệnh.
         if active_positions:
