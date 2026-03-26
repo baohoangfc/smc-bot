@@ -58,6 +58,7 @@ SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", "6"))
 MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.15"))
 MIN_ATR_PCT = float(os.environ.get("MIN_ATR_PCT", "0.03"))
 TREND_LOOKBACK = int(os.environ.get("TREND_LOOKBACK", "20"))
+ALLOW_FALLBACK_SIGNAL = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true").lower() == "true"
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -467,11 +468,17 @@ class BingXClient:
             params = self._build_entry_order_params(side, pos_side, quantity, order_type, price, tp, sl)
             data = self._signed_request("POST", path, params, timeout=15)
 
+            # Nếu lệnh đính kèm TP/SL bị từ chối, thử vào lệnh market trước rồi sẽ gắn TP/SL sau.
+            if self._extract_code(data) != 0 and (tp is not None or sl is not None):
+                print(f"[WARN] place_order with TP/SL failed, retry market only: {data}")
+                retry_plain = self._build_entry_order_params(side, pos_side, quantity, order_type, price, None, None)
+                data = self._signed_request("POST", path, retry_plain, timeout=15)
+
             # Nếu thiếu margin, giảm dần khối lượng và thử lại.
             cur_qty = float(quantity)
             while self._extract_code(data) == 101204 and cur_qty > 0.001:
                 cur_qty = round(cur_qty / 2, 4)
-                retry_params = self._build_entry_order_params(side, pos_side, cur_qty, order_type, price, tp, sl)
+                retry_params = self._build_entry_order_params(side, pos_side, cur_qty, order_type, price, None, None)
                 print(f"[WARN] Insufficient margin, thử lại quantity={cur_qty}")
                 data = self._signed_request("POST", path, retry_params, timeout=15)
 
@@ -665,7 +672,15 @@ def scan_signal(df):
     in_discount = close_price <= dealing_range_mid
     in_premium = close_price >= dealing_range_mid
 
-    if bullish_bias and liquidity_sweep_low and mss_bull and in_discount:
+    long_strict = bullish_bias and liquidity_sweep_low and mss_bull and in_discount
+    short_strict = bearish_bias and liquidity_sweep_high and mss_bear and in_premium
+
+    # Fallback mềm hơn: vẫn cùng xu hướng EMA + MSS nhưng không bắt buộc sweep, để tránh bỏ lỡ toàn bộ tín hiệu.
+    near_ema50 = abs(close_price - ema50) <= max(0.5, close_price * 0.0015)
+    long_fallback = ALLOW_FALLBACK_SIGNAL and bullish_bias and mss_bull and near_ema50
+    short_fallback = ALLOW_FALLBACK_SIGNAL and bearish_bias and mss_bear and near_ema50
+
+    if long_strict or long_fallback:
         e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "LONG", e)
         if tp is None or sl is None:
@@ -676,10 +691,11 @@ def scan_signal(df):
             'sl': sl,
             'tp': tp,
             'rr': rr_used,
+            'signal_mode': 'strict' if long_strict else 'fallback',
             'candle_time': str(last_closed['datetime'])
         }
 
-    if bearish_bias and liquidity_sweep_high and mss_bear and in_premium:
+    if short_strict or short_fallback:
         e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "SHORT", e)
         if tp is None or sl is None:
@@ -690,6 +706,7 @@ def scan_signal(df):
             'sl': sl,
             'tp': tp,
             'rr': rr_used,
+            'signal_mode': 'strict' if short_strict else 'fallback',
             'candle_time': str(last_closed['datetime'])
         }
 
@@ -710,6 +727,7 @@ def format_signal_msg(signal, order_label=None):
     side_text = "MUA (LONG)" if signal["side"] == "LONG" else "BÁN (SHORT)"
     rr_value = signal.get("rr", SCALP_RR_TARGET)
     rr_text = f"1:{rr_value:.1f}"
+    signal_mode = signal.get("signal_mode", "strict")
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     return (
         f"{emoji} <b>TÍN HIỆU SMC - {SYMBOL} {INTERVAL}</b>\n\n"
@@ -719,7 +737,8 @@ def format_signal_msg(signal, order_label=None):
         f"🎯 Vào lệnh  : <b>{format_price(signal['entry'])}</b>\n"
         f"🛑 Cắt lỗ    : <b>{format_price(signal['sl'])}</b>\n"
         f"✅ Chốt lời  : <b>{format_price(signal['tp'])}</b>\n"
-        f"📊 R:R       : <b>{rr_text}</b>\n\n"
+        f"📊 R:R       : <b>{rr_text}</b>\n"
+        f"🧠 Mode      : <b>{signal_mode}</b>\n\n"
         f"💵 Số dư VST : <b>{get_vst_balance_text()}</b>\n"
         f"🔌 Nguồn dữ liệu: <b>{DATA_SOURCE}</b>\n"
         f"⏰ <b>{format_vn_time(signal['candle_time'])} (GMT+7)</b>\n"
@@ -995,20 +1014,24 @@ while True:
                 for pos in list(active_positions):
                     if pos.get("tp") is not None:
                         if pos["side"] == "LONG" and float(live_price) >= float(pos["tp"]):
-                            send_telegram(f"🏁 <b>{pos.get('label')} đã chạm TP</b>")
+                            close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
+                            send_telegram(f"🏁 <b>{pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
                             active_positions.remove(pos)
                             continue
                         if pos["side"] == "SHORT" and float(live_price) <= float(pos["tp"]):
-                            send_telegram(f"🏁 <b>{pos.get('label')} đã chạm TP</b>")
+                            close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
+                            send_telegram(f"🏁 <b>{pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
                             active_positions.remove(pos)
                             continue
                     if pos.get("sl") is not None:
                         if pos["side"] == "LONG" and float(live_price) <= float(pos["sl"]):
-                            send_telegram(f"🛑 <b>{pos.get('label')} đã chạm SL</b>")
+                            close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
+                            send_telegram(f"🛑 <b>{pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
                             active_positions.remove(pos)
                             continue
                         if pos["side"] == "SHORT" and float(live_price) >= float(pos["sl"]):
-                            send_telegram(f"🛑 <b>{pos.get('label')} đã chạm SL</b>")
+                            close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
+                            send_telegram(f"🛑 <b>{pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
                             active_positions.remove(pos)
                             continue
                     send_telegram(format_pnl_msg(pos, float(live_price)))
