@@ -59,6 +59,8 @@ MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.15"))
 MIN_ATR_PCT = float(os.environ.get("MIN_ATR_PCT", "0.03"))
 TREND_LOOKBACK = int(os.environ.get("TREND_LOOKBACK", "20"))
 ALLOW_FALLBACK_SIGNAL = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true").lower() == "true"
+READ_ONLY_MODE = os.environ.get("READ_ONLY_MODE", "false").lower() == "true"
+SIGNAL_ENGINE = os.environ.get("SIGNAL_ENGINE", "auto").lower()  # auto | strict | backtest_v5
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -92,6 +94,27 @@ def send_telegram(msg):
     try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
     except: pass
+
+def is_trading_enabled():
+    """
+    Chỉ cho phép đặt/đóng lệnh khi đủ API key và không bật READ_ONLY_MODE.
+    """
+    if READ_ONLY_MODE:
+        return False
+    return bool(BINGX_API_KEY and BINGX_SECRET_KEY)
+
+def has_api_credentials():
+    return bool(BINGX_API_KEY and BINGX_SECRET_KEY)
+
+def resolve_signal_engine():
+    """
+    auto:
+    - Nếu bot chỉ cảnh báo (read-only) => ưu tiên backtest_v5 để bắt tín hiệu gần backtest.
+    - Nếu bot auto-trade => ưu tiên strict để lọc tín hiệu chặt hơn.
+    """
+    if SIGNAL_ENGINE in ("strict", "backtest_v5"):
+        return SIGNAL_ENGINE
+    return "backtest_v5" if not is_trading_enabled() else "strict"
 
 def calc_order_quantity(entry_price, notional_usdt=ORDER_NOTIONAL_USDT):
     """
@@ -248,6 +271,8 @@ class BingXClient:
 
     def get_balance_info(self, asset_name="VST"):
         """Lấy thông tin số dư chi tiết (balance/equity/availableMargin)."""
+        if not has_api_credentials():
+            return {"balance": 0.0, "equity": 0.0, "availableMargin": 0.0, "usedMargin": 0.0}
         path = "/openApi/swap/v2/user/balance"
         params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
         try:
@@ -278,6 +303,8 @@ class BingXClient:
         """
         Lấy vị thế đang mở của SYMBOL để tránh vào lệnh trùng/đóng lệnh ngoài ý muốn khi restart bot.
         """
+        if not has_api_credentials():
+            return None
         path = "/openApi/swap/v2/user/positions"
         params = {"symbol": SYMBOL, "timestamp": int(time.time() * 1000), "recvWindow": 5000}
         try:
@@ -592,9 +619,107 @@ def fetch_data(interval="15m", candles=500):
 def add_indicators(df):
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-    df['atr'] = (df['high'] - df['low']).ewm(span=14, adjust=False).mean()
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df['rsi'] = (100 - (100 / (1 + rs))).fillna(50)
+    tr = np.maximum(
+        df['high'] - df['low'],
+        np.maximum(
+            (df['high'] - df['close'].shift(1)).abs(),
+            (df['low'] - df['close'].shift(1)).abs()
+        )
+    )
+    df['atr'] = tr.ewm(span=14, adjust=False).mean()
     df['atr_pct'] = (df['atr'] / df['close']) * 100
     return df
+
+def _swing_highs(df, n=3):
+    idx = []
+    for i in range(n, len(df)-n):
+        if all(df['high'].iloc[i] > df['high'].iloc[i-j] for j in range(1, n+1)) and \
+           all(df['high'].iloc[i] > df['high'].iloc[i+j] for j in range(1, n+1)):
+            idx.append(i)
+    return idx
+
+def _swing_lows(df, n=3):
+    idx = []
+    for i in range(n, len(df)-n):
+        if all(df['low'].iloc[i] < df['low'].iloc[i-j] for j in range(1, n+1)) and \
+           all(df['low'].iloc[i] < df['low'].iloc[i+j] for j in range(1, n+1)):
+            idx.append(i)
+    return idx
+
+def scan_signal_backtest_v5(df):
+    if len(df) < 260:
+        return None
+    i = len(df) - 2
+    sh = _swing_highs(df, n=3)
+    sl = _swing_lows(df, n=3)
+    prev_sh = [h for h in sh if h < i-1]
+    prev_sl = [l for l in sl if l < i-1]
+    if not prev_sh or not prev_sl:
+        return None
+
+    c = float(df['close'].iloc[i])
+    sig = None
+    if c > float(df['high'].iloc[max(prev_sh)]):
+        sig = "BULL"
+    elif c < float(df['low'].iloc[max(prev_sl)]):
+        sig = "BEAR"
+    if not sig:
+        return None
+
+    atr = float(df['atr'].iloc[i])
+    ob = None
+    start = max(0, i - 20)
+    if sig == "BULL":
+        for j in range(i-1, start-1, -1):
+            o, c2 = float(df['open'].iloc[j]), float(df['close'].iloc[j])
+            h, l = float(df['high'].iloc[j]), float(df['low'].iloc[j])
+            body = abs(c2-o); rng = h-l
+            if c2 < o and rng > 0 and (body/rng) > 0.35 and body > atr*0.25:
+                if not any(float(df['close'].iloc[k]) < l for k in range(j+1, i)):
+                    ob = {"type": "BULL_OB", "hi": h, "lo": l, "mid": (h+l)/2}
+                    break
+    else:
+        for j in range(i-1, start-1, -1):
+            o, c2 = float(df['open'].iloc[j]), float(df['close'].iloc[j])
+            h, l = float(df['high'].iloc[j]), float(df['low'].iloc[j])
+            body = abs(c2-o); rng = h-l
+            if c2 > o and rng > 0 and (body/rng) > 0.35 and body > atr*0.25:
+                if not any(float(df['close'].iloc[k]) > h for k in range(j+1, i)):
+                    ob = {"type": "BEAR_OB", "hi": h, "lo": l, "mid": (h+l)/2}
+                    break
+    if not ob:
+        return None
+
+    o = float(df['open'].iloc[i]); h = float(df['high'].iloc[i]); l = float(df['low'].iloc[i]); c = float(df['close'].iloc[i])
+    po = float(df['open'].iloc[i-1]); pc = float(df['close'].iloc[i-1])
+    rsi = float(df['rsi'].iloc[i]); ema200 = float(df['ema200'].iloc[i])
+    if ob['type'] == "BULL_OB":
+        body = c-o; rng = h-l
+        confirm = (pc < po and c > o and o <= pc and c >= po) or (c > o and rng > 0 and (body/rng) > 0.55 and c > l + rng*0.6)
+        valid = c >= ema200 and 35 <= rsi <= 70 and l <= ob["hi"]
+        if not (confirm and valid):
+            return None
+        entry = ob["mid"]; sl = ob["lo"] - atr*0.5; risk = entry - sl
+        if risk <= 0 or risk > atr*3:
+            return None
+        tp = entry + risk*RR
+        return {'side': 'LONG', 'entry': round(entry,2), 'sl': round(sl,2), 'tp': round(tp,2), 'rr': RR, 'signal_mode': 'backtest_v5', 'candle_time': str(df['datetime'].iloc[i])}
+    else:
+        body = o-c; rng = h-l
+        confirm = (pc > po and c < o and o >= pc and c <= po) or (c < o and rng > 0 and (body/rng) > 0.55 and c < h - rng*0.6)
+        valid = c <= ema200 and 30 <= rsi <= 65 and h >= ob["lo"]
+        if not (confirm and valid):
+            return None
+        entry = ob["mid"]; sl = ob["hi"] + atr*0.5; risk = sl - entry
+        if risk <= 0 or risk > atr*3:
+            return None
+        tp = entry - risk*RR
+        return {'side': 'SHORT', 'entry': round(entry,2), 'sl': round(sl,2), 'tp': round(tp,2), 'rr': RR, 'signal_mode': 'backtest_v5', 'candle_time': str(df['datetime'].iloc[i])}
 
 def calc_scalp_tp_sl(df, side, entry):
     """
@@ -627,6 +752,8 @@ def calc_scalp_tp_sl(df, side, entry):
     return round(tp, 2), round(sl, 2), rr_used
 
 def scan_signal(df):
+    if resolve_signal_engine() == "backtest_v5":
+        return scan_signal_backtest_v5(df)
     """
     Tín hiệu scalp SMC được siết chặt:
     1) Có bias rõ ràng theo EMA50/EMA200 + cấu trúc gần nhất.
@@ -713,12 +840,18 @@ def scan_signal(df):
     return None
 
 def get_vst_balance_text():
+    if not has_api_credentials():
+        return "N/A (no API key)"
     return f"{bing_client.get_vst_balance():.4f} VST"
 
 def format_startup_msg(vst_balance):
+    mode_text = "READ-ONLY (chỉ gửi tín hiệu)" if not is_trading_enabled() else "TRADE TỰ ĐỘNG"
+    engine_used = resolve_signal_engine()
     return (
         "🚀 <b>SMC Bot đã khởi động</b>\n"
         f"💵 Số dư: <b>{vst_balance:.4f} VST</b>\n"
+        f"🧭 Chế độ: <b>{mode_text}</b>\n"
+        f"🧠 Signal engine: <b>{engine_used}</b> (config={SIGNAL_ENGINE})\n"
         f"🕒 Thời gian: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
 
@@ -868,18 +1001,24 @@ def _bg_fetcher():
 threading.Thread(target=_bg_fetcher, daemon=True).start()
 time.sleep(10) # Đợi dữ liệu lần đầu
 
-vst_bal = bing_client.get_vst_balance()
-existing_position = bing_client.get_open_position()
+vst_bal = bing_client.get_vst_balance() if has_api_credentials() else 0.0
+existing_position = bing_client.get_open_position() if is_trading_enabled() else None
 active_positions = []
 order_seq = 0
 if existing_position:
     order_seq += 1
     existing_position["label"] = f"LỆNH #{order_seq}"
     active_positions.append(existing_position)
-if not active_positions:
+if is_trading_enabled() and (not active_positions):
     bing_client.set_leverage("LONG", LEVERAGE)
     bing_client.set_leverage("SHORT", LEVERAGE)
 send_telegram(format_startup_msg(vst_bal))
+if not is_trading_enabled():
+    send_telegram(
+        "ℹ️ <b>Bot đang chạy ở chế độ READ-ONLY</b>\n"
+        "Sẽ phân tích và gửi tín hiệu, nhưng không tự động đặt/đóng lệnh.\n"
+        "Để bật auto trade: cung cấp BINGX_API_KEY + BINGX_SECRET_KEY và tắt READ_ONLY_MODE."
+    )
 
 last_signal_key = None
 last_status_notify_ts = time.time()
@@ -900,12 +1039,27 @@ while True:
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             # Khi restart bot: ghi nhận tín hiệu hiện tại, chỉ trade từ tín hiệu mới tiếp theo.
             if not bootstrapped_signal:
-                last_signal_key = sig_key
-                bootstrapped_signal = True
-                print(f"[INFO] Bootstrapped signal: {sig_key} - chờ tín hiệu mới để vào lệnh.")
-                time.sleep(10)
-                continue
+                if not is_trading_enabled():
+                    # Ở chế độ chỉ cảnh báo thì không cần bỏ qua tín hiệu đầu tiên sau restart.
+                    bootstrapped_signal = True
+                else:
+                    last_signal_key = sig_key
+                    bootstrapped_signal = True
+                    print(f"[INFO] Bootstrapped signal: {sig_key} - chờ tín hiệu mới để vào lệnh.")
+                    time.sleep(10)
+                    continue
             if sig_key != last_signal_key:
+                if not is_trading_enabled():
+                    order_seq += 1
+                    order_label = f"LỆNH #{order_seq}"
+                    send_telegram(format_signal_msg(signal, order_label))
+                    send_telegram(
+                        "🧪 <b>Bỏ qua đặt lệnh tự động</b>\n"
+                        "Lý do: bot đang ở chế độ READ-ONLY."
+                    )
+                    last_signal_key = sig_key
+                    time.sleep(10)
+                    continue
                 removable_positions = decide_positions_to_close(active_positions, signal["side"], float(live_price))
                 for pos in removable_positions:
                     pnl_snapshot = calc_live_pnl(pos, float(live_price))
@@ -1003,15 +1157,19 @@ while True:
         if active_positions:
             now_ts = time.time()
             if now_ts - last_pnl_notify_ts >= 60:
-                exchange_pos = bing_client.get_open_position()
-                if not exchange_pos:
-                    send_telegram("✅ <b>Không còn vị thế mở trên BingX</b>\nXóa danh sách lệnh đang theo dõi.")
-                    active_positions = []
-                    last_pnl_notify_ts = now_ts
-                    time.sleep(10)
-                    continue
+                if is_trading_enabled():
+                    exchange_pos = bing_client.get_open_position()
+                    if not exchange_pos:
+                        send_telegram("✅ <b>Không còn vị thế mở trên BingX</b>\nXóa danh sách lệnh đang theo dõi.")
+                        active_positions = []
+                        last_pnl_notify_ts = now_ts
+                        time.sleep(10)
+                        continue
 
                 for pos in list(active_positions):
+                    if not is_trading_enabled():
+                        send_telegram(format_pnl_msg(pos, float(live_price)))
+                        continue
                     if pos.get("tp") is not None:
                         if pos["side"] == "LONG" and float(live_price) >= float(pos["tp"]):
                             close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
