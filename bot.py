@@ -228,6 +228,77 @@ def normalize_tp_sl_by_entry(side, entry, tp, sl):
 
     return round(safe_tp, 2), round(safe_sl, 2), changed
 
+def calc_rr_from_levels(side, entry, tp, sl):
+    """
+    Tính RR thực tế từ entry/tp/sl.
+    Trả về None nếu thiếu dữ liệu hoặc thông số không hợp lệ.
+    """
+    try:
+        e = float(entry)
+        take_profit = float(tp)
+        stop_loss = float(sl)
+    except Exception:
+        return None
+
+    if e <= 0:
+        return None
+
+    if side == "LONG":
+        risk = e - stop_loss
+        reward = take_profit - e
+    else:
+        risk = stop_loss - e
+        reward = e - take_profit
+
+    if risk <= 0 or reward <= 0:
+        return None
+    return reward / risk
+
+def format_rr_text(side, entry, tp, sl, fallback_rr=None, decimals=2):
+    rr_value = calc_rr_from_levels(side, entry, tp, sl)
+    if rr_value is None:
+        rr_value = fallback_rr
+    if rr_value is None:
+        return "N/A"
+    return f"1:{float(rr_value):.{decimals}f}"
+
+def align_tp_sl_with_rr(side, entry, tp, sl, rr_target):
+    """
+    Đồng bộ TP/SL theo RR mục tiêu để tránh lệch RR khi entry thay đổi trước lúc đặt lệnh.
+    """
+    if entry is None or entry <= 0:
+        return tp, sl, False
+
+    e = float(entry)
+    safe_tp = float(tp) if tp is not None else None
+    safe_sl = float(sl) if sl is not None else None
+    changed = False
+
+    rr = rr_target if rr_target and rr_target > 0 else RR
+    min_tp_gap = max(0.5, e * (MIN_TP_PCT / 100.0))
+    min_sl_gap = max(0.5, e * (MIN_SL_PCT / 100.0))
+
+    if side == "LONG":
+        if safe_sl is None or safe_sl >= e:
+            safe_sl = e - min_sl_gap
+            changed = True
+        risk = max(e - safe_sl, min_sl_gap)
+        ideal_tp = e + max(min_tp_gap, risk * rr)
+        if safe_tp is None or abs(safe_tp - ideal_tp) > 0.01:
+            safe_tp = ideal_tp
+            changed = True
+    else:
+        if safe_sl is None or safe_sl <= e:
+            safe_sl = e + min_sl_gap
+            changed = True
+        risk = max(safe_sl - e, min_sl_gap)
+        ideal_tp = e - max(min_tp_gap, risk * rr)
+        if safe_tp is None or abs(safe_tp - ideal_tp) > 0.01:
+            safe_tp = ideal_tp
+            changed = True
+
+    return round(safe_tp, 2), round(safe_sl, 2), changed
+
 # ==========================================
 # 3. BINGX API CLIENT (Đã thêm Log để debug số dư)
 # ==========================================
@@ -885,8 +956,10 @@ def format_startup_msg(vst_balance):
 def format_signal_msg(signal, order_label=None):
     emoji = "🟢" if signal["side"] == "LONG" else "🔴"
     side_text = "MUA (LONG)" if signal["side"] == "LONG" else "BÁN (SHORT)"
-    rr_value = signal.get("rr", SCALP_RR_TARGET)
-    rr_text = f"1:{rr_value:.1f}"
+    rr_text = format_rr_text(
+        signal["side"], signal.get("entry"), signal.get("tp"), signal.get("sl"),
+        fallback_rr=signal.get("rr", SCALP_RR_TARGET), decimals=1
+    )
     signal_mode = signal.get("signal_mode", "strict")
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     signal_source = signal.get("source", DATA_SOURCE)
@@ -922,6 +995,10 @@ def format_status_msg(last_price, candle_time):
 def format_order_result_msg(signal, order_result, order_label=None, filled_entry=None):
     order_id = (order_result or {}).get("data", {}).get("order", {}).get("orderId", "N/A")
     entry_to_show = filled_entry if filled_entry is not None else signal.get("entry")
+    rr_text = format_rr_text(
+        signal["side"], entry_to_show, signal.get("tp"), signal.get("sl"),
+        fallback_rr=signal.get("rr"), decimals=2
+    )
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     return (
         "🟢 <b>DEMO - Đặt lệnh thị trường</b>\n\n"
@@ -930,6 +1007,7 @@ def format_order_result_msg(signal, order_result, order_label=None, filled_entry
         f"🎯 Entry    : <b>{format_price(entry_to_show)}</b>\n"
         f"🛑 Cắt lỗ   : <b>{format_price(signal['sl'])}</b>\n"
         f"✅ Chốt lời : <b>{format_price(signal['tp'])}</b>\n"
+        f"📊 R:R      : <b>{rr_text}</b>\n"
         f"💵 Số dư VST: <b>{get_vst_balance_text()}</b>\n"
         f"🧾 Order ID : <b>{order_id}</b>\n"
         f"📦 Notional : <b>{ORDER_NOTIONAL_USDT:.0f} USDT</b>\n"
@@ -962,6 +1040,10 @@ def format_pnl_msg(position, last_price):
     price_to_show = position.get("markPrice") or last_price
     tp_text = format_price(position.get("tp")) if position.get("tp") is not None else "Chưa có"
     sl_text = format_price(position.get("sl")) if position.get("sl") is not None else "Chưa có"
+    rr_text = format_rr_text(
+        side, entry, position.get("tp"), position.get("sl"),
+        fallback_rr=position.get("rr"), decimals=2
+    )
     order_label = position.get("label", "LỆNH")
     return (
         f"{pnl_emoji} <b>Theo dõi lệnh mỗi 1 phút</b>\n\n"
@@ -970,6 +1052,7 @@ def format_pnl_msg(position, last_price):
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
         f"🛑 Cắt lỗ    : <b>{sl_text}</b>\n"
         f"✅ Chốt lời  : <b>{tp_text}</b>\n"
+        f"📊 R:R       : <b>{rr_text}</b>\n"
         f"💰 Giá hiện tại: <b>{format_price(price_to_show)}</b>\n"
         f"📦 Khối lượng : <b>{qty}</b>\n"
         f"💵 PnL tạm tính: <b>{pnl:+.2f} USDT ({pnl_pct:+.2f}%)</b>\n"
@@ -1122,18 +1205,38 @@ while True:
                 order_signal["tp"], order_signal["sl"], levels_changed = normalize_tp_sl_by_entry(
                     order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl")
                 )
+                rr_aligned_tp, rr_aligned_sl, rr_changed = align_tp_sl_with_rr(
+                    order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl"), signal.get("rr")
+                )
+                order_signal["tp"], order_signal["sl"] = rr_aligned_tp, rr_aligned_sl
+                levels_changed = levels_changed or rr_changed
                 pre_safe_tp, pre_safe_sl = order_signal["tp"], order_signal["sl"]
                 order_signal["tp"], order_signal["sl"] = enforce_tp_sl_safety(
                     order_signal["side"], last_price, order_signal["tp"], order_signal["sl"], last_price
                 )
+                # enforce_tp_sl_safety có thể dịch TP/SL để hợp lệ với giá thị trường hiện tại,
+                # nên đồng bộ lại RR một lần nữa để TP/SL vẫn bám RR mục tiêu.
+                rr_final_tp, rr_final_sl, rr_final_changed = align_tp_sl_with_rr(
+                    order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl"), signal.get("rr")
+                )
+                order_signal["tp"], order_signal["sl"] = sanitize_tp_sl(
+                    order_signal["side"], rr_final_tp, rr_final_sl, last_price
+                )
                 levels_changed = levels_changed or (
                     pre_safe_tp != order_signal["tp"] or pre_safe_sl != order_signal["sl"]
                 )
+                levels_changed = levels_changed or rr_final_changed
+                effective_rr = calc_rr_from_levels(
+                    order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl")
+                )
+                if effective_rr is not None:
+                    order_signal["rr"] = effective_rr
                 if levels_changed:
                     send_telegram(
                         "🛠️ <b>Đã hiệu chỉnh TP/SL trước khi vào lệnh</b>\n"
                         f"TP: <b>{format_price(order_signal['tp'])}</b> | "
                         f"SL: <b>{format_price(order_signal['sl'])}</b>\n"
+                        f"R:R thực tế theo entry: <b>1:{order_signal.get('rr', signal.get('rr', RR)):.2f}</b>\n"
                         f"Tiêu chí: TP tối thiểu {MIN_TP_PCT:.2f}% và SL tối thiểu {MIN_SL_PCT:.2f}% so với entry."
                     )
                 quantity = calc_order_quantity(last_price, ORDER_NOTIONAL_USDT)
