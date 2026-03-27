@@ -708,7 +708,7 @@ def scan_signal_backtest_v5(df):
         if risk <= 0 or risk > atr*3:
             return None
         tp = entry + risk*RR
-        return {'side': 'LONG', 'entry': round(entry,2), 'sl': round(sl,2), 'tp': round(tp,2), 'rr': RR, 'signal_mode': 'backtest_v5', 'candle_time': str(df['datetime'].iloc[i])}
+        return {'side': 'LONG', 'entry': round(entry,2), 'sl': round(sl,2), 'tp': round(tp,2), 'rr': RR, 'signal_mode': 'backtest_v5', 'source': 'BINGX', 'candle_time': str(df['datetime'].iloc[i])}
     else:
         body = o-c; rng = h-l
         confirm = (pc > po and c < o and o >= pc and c <= po) or (c < o and rng > 0 and (body/rng) > 0.55 and c < h - rng*0.6)
@@ -719,7 +719,7 @@ def scan_signal_backtest_v5(df):
         if risk <= 0 or risk > atr*3:
             return None
         tp = entry - risk*RR
-        return {'side': 'SHORT', 'entry': round(entry,2), 'sl': round(sl,2), 'tp': round(tp,2), 'rr': RR, 'signal_mode': 'backtest_v5', 'candle_time': str(df['datetime'].iloc[i])}
+        return {'side': 'SHORT', 'entry': round(entry,2), 'sl': round(sl,2), 'tp': round(tp,2), 'rr': RR, 'signal_mode': 'backtest_v5', 'source': 'BINGX', 'candle_time': str(df['datetime'].iloc[i])}
 
 def calc_scalp_tp_sl(df, side, entry):
     """
@@ -761,7 +761,7 @@ def scan_signal(df):
     3) Có MSS (close phá cấu trúc ngược lại sau sweep).
     4) ATR tối thiểu để tránh vùng nhiễu quá thấp.
     """
-    min_bars = max(220, SWING_LOOKBACK + TREND_LOOKBACK + 5)
+    min_bars = max(160, SWING_LOOKBACK + TREND_LOOKBACK + 5)
     if len(df) < min_bars:
         return None
 
@@ -802,40 +802,67 @@ def scan_signal(df):
     long_strict = bullish_bias and liquidity_sweep_low and mss_bull and in_discount
     short_strict = bearish_bias and liquidity_sweep_high and mss_bear and in_premium
 
+    # SMC-lite: vẫn giữ bias + MSS, nới điều kiện sweep bằng cách chấp nhận discount/premium zone.
+    long_smc_lite = bullish_bias and mss_bull and (liquidity_sweep_low or in_discount)
+    short_smc_lite = bearish_bias and mss_bear and (liquidity_sweep_high or in_premium)
+
     # Fallback mềm hơn: vẫn cùng xu hướng EMA + MSS nhưng không bắt buộc sweep, để tránh bỏ lỡ toàn bộ tín hiệu.
-    near_ema50 = abs(close_price - ema50) <= max(0.5, close_price * 0.0015)
+    near_ema50 = abs(close_price - ema50) <= max(0.5, close_price * 0.0035)
     long_fallback = ALLOW_FALLBACK_SIGNAL and bullish_bias and mss_bull and near_ema50
     short_fallback = ALLOW_FALLBACK_SIGNAL and bearish_bias and mss_bear and near_ema50
 
-    if long_strict or long_fallback:
+    if long_strict or long_smc_lite or long_fallback:
         e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "LONG", e)
         if tp is None or sl is None:
             return None
+        if long_strict:
+            mode = "strict"
+        elif long_smc_lite:
+            mode = "smc_lite"
+        else:
+            mode = "fallback"
         return {
             'side': 'LONG',
             'entry': e,
             'sl': sl,
             'tp': tp,
             'rr': rr_used,
-            'signal_mode': 'strict' if long_strict else 'fallback',
+            'signal_mode': mode,
+            'source': 'BINGX',
             'candle_time': str(last_closed['datetime'])
         }
 
-    if short_strict or short_fallback:
+    if short_strict or short_smc_lite or short_fallback:
         e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "SHORT", e)
         if tp is None or sl is None:
             return None
+        if short_strict:
+            mode = "strict"
+        elif short_smc_lite:
+            mode = "smc_lite"
+        else:
+            mode = "fallback"
         return {
             'side': 'SHORT',
             'entry': e,
             'sl': sl,
             'tp': tp,
             'rr': rr_used,
-            'signal_mode': 'strict' if short_strict else 'fallback',
+            'signal_mode': mode,
+            'source': 'BINGX',
             'candle_time': str(last_closed['datetime'])
         }
+
+    # Lưới an toàn cuối: nếu engine strict/fallback chưa ra tín hiệu thì thử logic backtest_v5
+    # để hạn chế tình trạng "đứng im" quá lâu khi thị trường đi một chiều mạnh.
+    if ALLOW_FALLBACK_SIGNAL:
+        backup_signal = scan_signal_backtest_v5(df)
+        if backup_signal:
+            backup_signal = dict(backup_signal)
+            backup_signal["signal_mode"] = "backtest_v5_fallback"
+            return backup_signal
 
     return None
 
@@ -862,6 +889,7 @@ def format_signal_msg(signal, order_label=None):
     rr_text = f"1:{rr_value:.1f}"
     signal_mode = signal.get("signal_mode", "strict")
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
+    signal_source = signal.get("source", DATA_SOURCE)
     return (
         f"{emoji} <b>TÍN HIỆU SMC - {SYMBOL} {INTERVAL}</b>\n\n"
         f"{order_line}"
@@ -873,7 +901,7 @@ def format_signal_msg(signal, order_label=None):
         f"📊 R:R       : <b>{rr_text}</b>\n"
         f"🧠 Mode      : <b>{signal_mode}</b>\n\n"
         f"💵 Số dư VST : <b>{get_vst_balance_text()}</b>\n"
-        f"🔌 Nguồn dữ liệu: <b>{DATA_SOURCE}</b>\n"
+        f"🔌 Nguồn dữ liệu: <b>{signal_source}</b>\n"
         f"⏰ <b>{format_vn_time(signal['candle_time'])} (GMT+7)</b>\n"
         "⚠️ <i>Chỉ tham khảo, tự xác nhận trước khi vào lệnh</i>"
     )
@@ -1036,6 +1064,10 @@ while True:
             live_price = float(last_closed["close"])
         signal = scan_signal(df)
         if signal:
+            if signal.get("source", DATA_SOURCE) != "BINGX":
+                print(f"[WARN] Bỏ qua tín hiệu do nguồn không phải BingX: {signal.get('source')}")
+                time.sleep(10)
+                continue
             sig_key = f"{signal['side']}_{signal['candle_time']}"
             # Khi restart bot: ghi nhận tín hiệu hiện tại, chỉ trade từ tín hiệu mới tiếp theo.
             if not bootstrapped_signal:
