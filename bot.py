@@ -42,7 +42,11 @@ BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
 BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 BINGX_URL        = "https://open-api-vst.bingx.com"
 DATA_SOURCE      = "BINGX"
-SYMBOL           = os.environ.get("BINGX_SYMBOL", "NCCOGOLD2USD-USDT")
+SYMBOLS_RAW      = os.environ.get("BINGX_SYMBOLS", "NCCOGOLD2USD-USDT,BTC-USDT")
+SYMBOLS          = [s.strip() for s in SYMBOLS_RAW.split(",") if s.strip()]
+if not SYMBOLS:
+    SYMBOLS = [os.environ.get("BINGX_SYMBOL", "NCCOGOLD2USD-USDT")]
+SYMBOL = SYMBOLS[0]
 INTERVAL         = os.environ.get("INTERVAL", "15m")
 RR               = float(os.environ.get("RR", "2.0"))
 ORDER_NOTIONAL_USDT = float(os.environ.get("ORDER_NOTIONAL_USDT", "1000"))
@@ -370,14 +374,14 @@ class BingXClient:
     def get_vst_balance(self):
         return self.get_balance_info("VST").get("balance", 0.0)
 
-    def get_open_position(self):
+    def get_open_position(self, symbol=SYMBOL):
         """
         Lấy vị thế đang mở của SYMBOL để tránh vào lệnh trùng/đóng lệnh ngoài ý muốn khi restart bot.
         """
         if not has_api_credentials():
             return None
         path = "/openApi/swap/v2/user/positions"
-        params = {"symbol": SYMBOL, "timestamp": int(time.time() * 1000), "recvWindow": 5000}
+        params = {"symbol": symbol, "timestamp": int(time.time() * 1000), "recvWindow": 5000}
         try:
             data = self._signed_request("GET", path, params, timeout=10)
             if data.get("code") != 0:
@@ -412,7 +416,7 @@ class BingXClient:
             print(f"[WARN] get_open_position exception: {e}")
         return None
 
-    def get_last_price(self):
+    def get_last_price(self, symbol=SYMBOL):
         """
         Lấy giá mới nhất trực tiếp từ BingX quote API.
         Thử lần lượt các endpoint để tương thích nhiều phiên bản API.
@@ -424,7 +428,7 @@ class BingXClient:
         ]
         for path in candidates:
             try:
-                data = self._public_request(path, {"symbol": SYMBOL}, timeout=10)
+                data = self._public_request(path, {"symbol": symbol}, timeout=10)
                 if data.get("code") != 0:
                     continue
                 payload = data.get("data", {})
@@ -443,7 +447,7 @@ class BingXClient:
                 continue
         return None
 
-    def get_klines(self, interval="15m", limit=500):
+    def get_klines(self, symbol=SYMBOL, interval="15m", limit=500):
         """
         Lấy nến trực tiếp từ BingX thay vì nguồn ngoài để đảm bảo khớp dữ liệu sàn.
         """
@@ -453,7 +457,7 @@ class BingXClient:
         ]
         for path in endpoints:
             try:
-                data = self._public_request(path, {"symbol": SYMBOL, "interval": interval, "limit": limit}, timeout=15)
+                data = self._public_request(path, {"symbol": symbol, "interval": interval, "limit": limit}, timeout=15)
                 if data.get("code") != 0:
                     continue
                 rows = data.get("data", [])
@@ -511,10 +515,10 @@ class BingXClient:
                 continue
         return None
 
-    def set_leverage(self, side="LONG", leverage=100):
+    def set_leverage(self, symbol=SYMBOL, side="LONG", leverage=100):
         path = "/openApi/swap/v2/trade/leverage"
         params = {
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "side": side,
             "leverage": int(leverage),
             "timestamp": int(time.time() * 1000),
@@ -528,9 +532,9 @@ class BingXClient:
             print(f"[WARN] set_leverage {side} exception: {e}")
             return None
 
-    def _build_entry_order_params(self, side, pos_side, quantity, order_type="MARKET", price=None, tp=None, sl=None):
+    def _build_entry_order_params(self, symbol, side, pos_side, quantity, order_type="MARKET", price=None, tp=None, sl=None):
         req = {
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "side": side,
             "positionSide": pos_side,
             "type": order_type,
@@ -559,24 +563,24 @@ class BingXClient:
         except Exception:
             return None
 
-    def place_order(self, side, pos_side, quantity, order_type="MARKET", price=None, tp=None, sl=None):
+    def place_order(self, symbol, side, pos_side, quantity, order_type="MARKET", price=None, tp=None, sl=None):
         path = "/openApi/swap/v2/trade/order"
 
         try:
-            params = self._build_entry_order_params(side, pos_side, quantity, order_type, price, tp, sl)
+            params = self._build_entry_order_params(symbol, side, pos_side, quantity, order_type, price, tp, sl)
             data = self._signed_request("POST", path, params, timeout=15)
 
             # Nếu lệnh đính kèm TP/SL bị từ chối, thử vào lệnh market trước rồi sẽ gắn TP/SL sau.
             if self._extract_code(data) != 0 and (tp is not None or sl is not None):
                 print(f"[WARN] place_order with TP/SL failed, retry market only: {data}")
-                retry_plain = self._build_entry_order_params(side, pos_side, quantity, order_type, price, None, None)
+                retry_plain = self._build_entry_order_params(symbol, side, pos_side, quantity, order_type, price, None, None)
                 data = self._signed_request("POST", path, retry_plain, timeout=15)
 
             # Nếu thiếu margin, giảm dần khối lượng và thử lại.
             cur_qty = float(quantity)
             while self._extract_code(data) == 101204 and cur_qty > 0.001:
                 cur_qty = round(cur_qty / 2, 4)
-                retry_params = self._build_entry_order_params(side, pos_side, cur_qty, order_type, price, None, None)
+                retry_params = self._build_entry_order_params(symbol, side, pos_side, cur_qty, order_type, price, None, None)
                 print(f"[WARN] Insufficient margin, thử lại quantity={cur_qty}")
                 data = self._signed_request("POST", path, retry_params, timeout=15)
 
@@ -585,13 +589,13 @@ class BingXClient:
             print(f"[ERROR] place_order exception: {e}")
             return None
 
-    def place_market_order(self, side, pos_side, quantity, tp=None, sl=None):
-        return self.place_order(side, pos_side, quantity, "MARKET", None, tp, sl)
+    def place_market_order(self, symbol, side, pos_side, quantity, tp=None, sl=None):
+        return self.place_order(symbol, side, pos_side, quantity, "MARKET", None, tp, sl)
 
-    def place_limit_order(self, side, pos_side, quantity, price, tp=None, sl=None):
-        return self.place_order(side, pos_side, quantity, "LIMIT", price, tp, sl)
+    def place_limit_order(self, symbol, side, pos_side, quantity, price, tp=None, sl=None):
+        return self.place_order(symbol, side, pos_side, quantity, "LIMIT", price, tp, sl)
 
-    def close_position_market(self, pos_side, quantity=None):
+    def close_position_market(self, symbol, pos_side, quantity=None):
         """
         Đóng vị thế theo market cho đúng chiều positionSide.
         Trả về response API để caller tự xử lý thành công/thất bại.
@@ -600,13 +604,13 @@ class BingXClient:
             close_side = "SELL" if pos_side == "LONG" else "BUY"
             qty = quantity
             if qty is None or float(qty) <= 0:
-                cur = self.get_open_position()
+                cur = self.get_open_position(symbol)
                 if not cur or cur.get("side") != pos_side:
                     return {"code": -1, "msg": "Không tìm thấy vị thế phù hợp để đóng"}
                 qty = cur.get("quantity", 0)
 
             params = {
-                "symbol": SYMBOL,
+                "symbol": symbol,
                 "side": close_side,
                 "positionSide": pos_side,
                 "type": "MARKET",
@@ -619,15 +623,15 @@ class BingXClient:
             print(f"[WARN] close_position_market exception: {e}")
             return {"code": -1, "msg": str(e)}
 
-    def add_missing_tp_sl(self, pos_side, tp=None, sl=None):
+    def add_missing_tp_sl(self, symbol, pos_side, tp=None, sl=None):
         """
         Nếu vị thế hiện tại chưa có TP/SL trên sàn thì đặt bổ sung ngay.
         """
         try:
             if tp is None and sl is None:
-                return {"tp_added": False, "sl_added": False, "position": self.get_open_position()}
+                return {"tp_added": False, "sl_added": False, "position": self.get_open_position(symbol)}
 
-            position = self.get_open_position()
+            position = self.get_open_position(symbol)
             if not position or position.get("side") != pos_side:
                 return {"tp_added": False, "sl_added": False, "position": position}
 
@@ -637,7 +641,7 @@ class BingXClient:
 
             if position.get("tp") is None and tp is not None:
                 tp_params = {
-                    "symbol": SYMBOL,
+                    "symbol": symbol,
                     "side": close_side,
                     "positionSide": pos_side,
                     "type": "TAKE_PROFIT_MARKET",
@@ -654,7 +658,7 @@ class BingXClient:
 
             if position.get("sl") is None and sl is not None:
                 sl_params = {
-                    "symbol": SYMBOL,
+                    "symbol": symbol,
                     "side": close_side,
                     "positionSide": pos_side,
                     "type": "STOP_MARKET",
@@ -669,21 +673,21 @@ class BingXClient:
                 if not result["sl_added"]:
                     print(f"[WARN] Add SL thất bại: {sl_resp}")
 
-            result["position"] = self.get_open_position()
+            result["position"] = self.get_open_position(symbol)
             return result
         except Exception as e:
             print(f"[WARN] add_missing_tp_sl exception: {e}")
-            return {"tp_added": False, "sl_added": False, "position": self.get_open_position()}
+            return {"tp_added": False, "sl_added": False, "position": self.get_open_position(symbol)}
 
 bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
 # ==========================================
 # (Các hàm fetch_data, indicators, SMC Logic giữ nguyên)
 # ==========================================
-def fetch_data(interval="15m", candles=500):
+def fetch_data(symbol, interval="15m", candles=500):
     # Dữ liệu nến dùng cho tín hiệu chỉ lấy từ API BingX (không dùng Yahoo/nguồn khác).
     try:
-        return bing_client.get_klines(interval=interval, limit=candles)
+        return bing_client.get_klines(symbol=symbol, interval=interval, limit=candles)
     except Exception:
         return None
 
@@ -949,11 +953,12 @@ def format_startup_msg(vst_balance):
         "🚀 <b>SMC Bot đã khởi động</b>\n"
         f"💵 Số dư: <b>{vst_balance:.4f} VST</b>\n"
         f"🧭 Chế độ: <b>{mode_text}</b>\n"
+        f"📚 Danh mục: <b>{', '.join(SYMBOLS)}</b>\n"
         f"🧠 Signal engine: <b>{engine_used}</b> (config={SIGNAL_ENGINE})\n"
         f"🕒 Thời gian: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
 
-def format_signal_msg(signal, order_label=None):
+def format_signal_msg(signal, symbol, order_label=None):
     emoji = "🟢" if signal["side"] == "LONG" else "🔴"
     side_text = "MUA (LONG)" if signal["side"] == "LONG" else "BÁN (SHORT)"
     rr_text = format_rr_text(
@@ -964,7 +969,7 @@ def format_signal_msg(signal, order_label=None):
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     signal_source = signal.get("source", DATA_SOURCE)
     return (
-        f"{emoji} <b>TÍN HIỆU SMC - {SYMBOL} {INTERVAL}</b>\n\n"
+        f"{emoji} <b>TÍN HIỆU SMC - {symbol} {INTERVAL}</b>\n\n"
         f"{order_line}"
         f"📌 Lệnh      : <b>{side_text}</b>\n"
         f"💰 Giá hiện tại : <b>{format_price(signal['entry'])}</b>\n"
@@ -979,11 +984,11 @@ def format_signal_msg(signal, order_label=None):
         "⚠️ <i>Chỉ tham khảo, tự xác nhận trước khi vào lệnh</i>"
     )
 
-def format_status_msg(last_price, candle_time):
+def format_status_msg(symbol, last_price, candle_time):
     next_time = now_vn() + timedelta(hours=1)
     return (
         f"🤖 <b>SMC Bot - Cập nhật {format_vn_time(candle_time, '%H:%M')} (GMT+7)</b>\n\n"
-        f"Giá {SYMBOL} : <b>{format_price(last_price)}</b>\n"
+        f"Giá {symbol} : <b>{format_price(last_price)}</b>\n"
         f"Khung TG    : <b>{INTERVAL}</b>\n"
         f"Nguồn dữ liệu: <b>{DATA_SOURCE}</b>\n"
         f"Số dư VST   : <b>{get_vst_balance_text()}</b>\n"
@@ -992,7 +997,7 @@ def format_status_msg(last_price, candle_time):
         f"Cập nhật tiếp theo lúc <b>{format_vn_time(next_time, '%H:%M')}</b>"
     )
 
-def format_order_result_msg(signal, order_result, order_label=None, filled_entry=None):
+def format_order_result_msg(signal, symbol, order_result, order_label=None, filled_entry=None):
     order_id = (order_result or {}).get("data", {}).get("order", {}).get("orderId", "N/A")
     entry_to_show = filled_entry if filled_entry is not None else signal.get("entry")
     rr_text = format_rr_text(
@@ -1002,6 +1007,7 @@ def format_order_result_msg(signal, order_result, order_label=None, filled_entry
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     return (
         "🟢 <b>DEMO - Đặt lệnh thị trường</b>\n\n"
+        f"🏷️ Mã        : <b>{symbol}</b>\n"
         f"{order_line}"
         f"📌 Lệnh     : <b>{'MUA (LONG)' if signal['side'] == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry    : <b>{format_price(entry_to_show)}</b>\n"
@@ -1097,15 +1103,18 @@ def decide_positions_to_close(active_positions, incoming_side, live_price):
 # ==========================================
 # 4. BACKGROUND FETCH & MAIN LOOP
 # ==========================================
-_df_cache = {"df": None}; _lock = threading.Lock()
+_df_cache = {symbol: None for symbol in SYMBOLS}; _lock = threading.Lock()
 def _bg_fetcher():
     while True:
         try:
-            df = fetch_data(INTERVAL)
-            if df is not None:
+            for symbol in SYMBOLS:
+                df = fetch_data(symbol, INTERVAL)
+                if df is None:
+                    continue
                 df = add_indicators(df)
-                with _lock: _df_cache["df"] = df
-                print(f"[BG] Updated | Close: {df['close'].iloc[-1]}")
+                with _lock:
+                    _df_cache[symbol] = df
+                print(f"[BG] Updated {symbol} | Close: {df['close'].iloc[-1]}")
         except: pass
         time.sleep(30)
 
@@ -1113,16 +1122,17 @@ threading.Thread(target=_bg_fetcher, daemon=True).start()
 time.sleep(10) # Đợi dữ liệu lần đầu
 
 vst_bal = bing_client.get_vst_balance() if has_api_credentials() else 0.0
-existing_position = bing_client.get_open_position() if is_trading_enabled() else None
-active_positions = []
-order_seq = 0
-if existing_position:
-    order_seq += 1
-    existing_position["label"] = f"LỆNH #{order_seq}"
-    active_positions.append(existing_position)
-if is_trading_enabled() and (not active_positions):
-    bing_client.set_leverage("LONG", LEVERAGE)
-    bing_client.set_leverage("SHORT", LEVERAGE)
+active_positions_by_symbol = {symbol: [] for symbol in SYMBOLS}
+order_seq_by_symbol = {symbol: 0 for symbol in SYMBOLS}
+for symbol in SYMBOLS:
+    existing_position = bing_client.get_open_position(symbol) if is_trading_enabled() else None
+    if existing_position:
+        order_seq_by_symbol[symbol] += 1
+        existing_position["label"] = f"LỆNH #{order_seq_by_symbol[symbol]}"
+        active_positions_by_symbol[symbol].append(existing_position)
+    if is_trading_enabled() and (not active_positions_by_symbol[symbol]):
+        bing_client.set_leverage(symbol, "LONG", LEVERAGE)
+        bing_client.set_leverage(symbol, "SHORT", LEVERAGE)
 send_telegram(format_startup_msg(vst_bal))
 if not is_trading_enabled():
     send_telegram(
@@ -1131,204 +1141,201 @@ if not is_trading_enabled():
         "Để bật auto trade: cung cấp BINGX_API_KEY + BINGX_SECRET_KEY và tắt READ_ONLY_MODE."
     )
 
-last_signal_key = None
-last_status_notify_ts = time.time()
-last_pnl_notify_ts = 0
-bootstrapped_signal = False
+last_signal_key_by_symbol = {symbol: None for symbol in SYMBOLS}
+last_status_notify_ts_by_symbol = {symbol: time.time() for symbol in SYMBOLS}
+last_pnl_notify_ts_by_symbol = {symbol: 0 for symbol in SYMBOLS}
+bootstrapped_signal_by_symbol = {symbol: False for symbol in SYMBOLS}
 while True:
     try:
-        with _lock: df = _df_cache["df"]
-        if df is None: time.sleep(5); continue
-
-        last_closed = df.iloc[-2]
-        candle_time = str(last_closed["datetime"])
-        live_price = bing_client.get_last_price()
-        if live_price is None:
-            live_price = float(last_closed["close"])
-        signal = scan_signal(df)
-        if signal:
-            if signal.get("source", DATA_SOURCE) != "BINGX":
-                print(f"[WARN] Bỏ qua tín hiệu do nguồn không phải BingX: {signal.get('source')}")
-                time.sleep(10)
+        for symbol in SYMBOLS:
+            with _lock:
+                df = _df_cache.get(symbol)
+            if df is None:
                 continue
-            sig_key = f"{signal['side']}_{signal['candle_time']}"
-            # Khi restart bot: ghi nhận tín hiệu hiện tại, chỉ trade từ tín hiệu mới tiếp theo.
-            if not bootstrapped_signal:
-                if not is_trading_enabled():
-                    # Ở chế độ chỉ cảnh báo thì không cần bỏ qua tín hiệu đầu tiên sau restart.
-                    bootstrapped_signal = True
-                else:
-                    last_signal_key = sig_key
-                    bootstrapped_signal = True
-                    print(f"[INFO] Bootstrapped signal: {sig_key} - chờ tín hiệu mới để vào lệnh.")
-                    time.sleep(10)
-                    continue
-            if sig_key != last_signal_key:
-                if not is_trading_enabled():
-                    order_seq += 1
-                    order_label = f"LỆNH #{order_seq}"
-                    send_telegram(format_signal_msg(signal, order_label))
-                    send_telegram(
-                        "🧪 <b>Bỏ qua đặt lệnh tự động</b>\n"
-                        "Lý do: bot đang ở chế độ READ-ONLY."
-                    )
-                    last_signal_key = sig_key
-                    time.sleep(10)
-                    continue
-                removable_positions = decide_positions_to_close(active_positions, signal["side"], float(live_price))
-                for pos in removable_positions:
-                    pnl_snapshot = calc_live_pnl(pos, float(live_price))
-                    close_resp = bing_client.close_position_market(pos.get("side"), pos.get("quantity"))
-                    close_ok = close_resp and close_resp.get("code") == 0
-                    if close_ok:
-                        active_positions = [x for x in active_positions if x.get("label") != pos.get("label")]
-                    send_telegram(
-                        "🔄 <b>Điều chỉnh danh mục lệnh</b>\n"
-                        f"Đóng theo phân tích: <b>{pos.get('label')}</b> ({pos.get('side')})\n"
-                        f"Kết quả đóng lệnh: <b>{'Thành công' if close_ok else 'Thất bại'}</b>\n"
-                        f"PnL tạm tính khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>\n"
-                        f"Lý do: ưu tiên tín hiệu mới {signal['side']} và giữ tối đa {MAX_ACTIVE_ORDERS} lệnh.\n"
-                        f"Chi tiết API: <b>{(close_resp or {}).get('msg', 'N/A')}</b>"
-                    )
-                if len(active_positions) >= MAX_ACTIVE_ORDERS:
-                    print("[INFO] Đã đạt tối đa số lệnh giữ, bỏ qua tín hiệu mới.")
-                    last_signal_key = sig_key
-                    time.sleep(10)
-                    continue
-                order_seq += 1
-                order_label = f"LỆNH #{order_seq}"
-                send_telegram(format_signal_msg(signal, order_label))
-                last_signal_key = sig_key
-                # Đặt lệnh
-                last_price = float(live_price)
-                order_signal = dict(signal)
-                order_signal["tp"], order_signal["sl"], levels_changed = normalize_tp_sl_by_entry(
-                    order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl")
-                )
-                rr_aligned_tp, rr_aligned_sl, rr_changed = align_tp_sl_with_rr(
-                    order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl"), signal.get("rr")
-                )
-                order_signal["tp"], order_signal["sl"] = rr_aligned_tp, rr_aligned_sl
-                levels_changed = levels_changed or rr_changed
-                pre_safe_tp, pre_safe_sl = order_signal["tp"], order_signal["sl"]
-                order_signal["tp"], order_signal["sl"] = enforce_tp_sl_safety(
-                    order_signal["side"], last_price, order_signal["tp"], order_signal["sl"], last_price
-                )
-                # enforce_tp_sl_safety có thể dịch TP/SL để hợp lệ với giá thị trường hiện tại,
-                # nên đồng bộ lại RR một lần nữa để TP/SL vẫn bám RR mục tiêu.
-                rr_final_tp, rr_final_sl, rr_final_changed = align_tp_sl_with_rr(
-                    order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl"), signal.get("rr")
-                )
-                order_signal["tp"], order_signal["sl"] = sanitize_tp_sl(
-                    order_signal["side"], rr_final_tp, rr_final_sl, last_price
-                )
-                levels_changed = levels_changed or (
-                    pre_safe_tp != order_signal["tp"] or pre_safe_sl != order_signal["sl"]
-                )
-                levels_changed = levels_changed or rr_final_changed
-                effective_rr = calc_rr_from_levels(
-                    order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl")
-                )
-                if effective_rr is not None:
-                    order_signal["rr"] = effective_rr
-                if levels_changed:
-                    send_telegram(
-                        "🛠️ <b>Đã hiệu chỉnh TP/SL trước khi vào lệnh</b>\n"
-                        f"TP: <b>{format_price(order_signal['tp'])}</b> | "
-                        f"SL: <b>{format_price(order_signal['sl'])}</b>\n"
-                        f"R:R thực tế theo entry: <b>1:{order_signal.get('rr', signal.get('rr', RR)):.2f}</b>\n"
-                        f"Tiêu chí: TP tối thiểu {MIN_TP_PCT:.2f}% và SL tối thiểu {MIN_SL_PCT:.2f}% so với entry."
-                    )
-                quantity = calc_order_quantity(last_price, ORDER_NOTIONAL_USDT)
-                order = bing_client.place_market_order("BUY" if signal['side']=='LONG' else "SELL", 
-                                                       signal['side'], quantity, order_signal['tp'], order_signal['sl'])
-                print(f"Order Result: {order}")
-                if order and order.get("code") == 0:
-                    fill_price = extract_order_avg_price(order, last_price)
-                    send_telegram(format_order_result_msg(order_signal, order, order_label, fill_price))
-                    protection_result = bing_client.add_missing_tp_sl(
-                        signal["side"], order_signal.get("tp"), order_signal.get("sl")
-                    )
-                    exchange_pos = (protection_result or {}).get("position")
-                    if exchange_pos:
-                        has_tp = exchange_pos.get("tp") is not None
-                        has_sl = exchange_pos.get("sl") is not None
-                        if not (has_tp and has_sl):
-                            send_telegram(
-                                "⚠️ <b>Cảnh báo:</b> Lệnh đã khớp nhưng chưa thấy đủ TP/SL trên sàn.\n"
-                                f"TP: <b>{'Có' if has_tp else 'Thiếu'}</b> | "
-                                f"SL: <b>{'Có' if has_sl else 'Thiếu'}</b>\n"
-                                "Vui lòng kiểm tra lại trên BingX."
-                            )
-                        elif protection_result.get("tp_added") or protection_result.get("sl_added"):
-                            send_telegram(
-                                "🛡️ <b>Đã bổ sung TP/SL sau khi vào lệnh</b>\n"
-                                f"TP thêm mới: <b>{'Có' if protection_result.get('tp_added') else 'Không'}</b> | "
-                                f"SL thêm mới: <b>{'Có' if protection_result.get('sl_added') else 'Không'}</b>"
-                            )
 
-                    active_positions.append({
-                        "label": order_label,
-                        "side": signal["side"],
-                        "entry": fill_price,
-                        "quantity": float(quantity),
-                        "tp": exchange_pos.get("tp") if exchange_pos and exchange_pos.get("tp") is not None else order_signal.get("tp"),
-                        "sl": exchange_pos.get("sl") if exchange_pos and exchange_pos.get("sl") is not None else order_signal.get("sl"),
-                        "opened_at": now_vn()
-                    })
-                    last_pnl_notify_ts = 0
-                else:
-                    err_msg = (order or {}).get("msg", "Không rõ lỗi")
-                    send_telegram(
-                        "❌ <b>Đặt lệnh thất bại</b>\n"
-                        f"🆔 Mã lệnh: <b>{order_label}</b>\n"
-                        f"Lý do: <b>{err_msg}</b>"
-                    )
-        elif (not active_positions) and (time.time() - last_status_notify_ts >= 3600):
-            send_telegram(format_status_msg(live_price, candle_time))
-            last_status_notify_ts = time.time()
+            active_positions = active_positions_by_symbol[symbol]
+            last_closed = df.iloc[-2]
+            candle_time = str(last_closed["datetime"])
+            live_price = bing_client.get_last_price(symbol)
+            if live_price is None:
+                live_price = float(last_closed["close"])
 
-        # Nếu đã vào lệnh, gửi noti lời/lỗ mỗi 1 phút cho từng lệnh.
-        if active_positions:
-            now_ts = time.time()
-            if now_ts - last_pnl_notify_ts >= 60:
-                if is_trading_enabled():
-                    exchange_pos = bing_client.get_open_position()
-                    if not exchange_pos:
-                        send_telegram("✅ <b>Không còn vị thế mở trên BingX</b>\nXóa danh sách lệnh đang theo dõi.")
-                        active_positions = []
-                        last_pnl_notify_ts = now_ts
-                        time.sleep(10)
-                        continue
-
-                for pos in list(active_positions):
+            signal = scan_signal(df)
+            if signal:
+                if signal.get("source", DATA_SOURCE) != "BINGX":
+                    print(f"[WARN] Bỏ qua tín hiệu do nguồn không phải BingX: {signal.get('source')}")
+                    continue
+                sig_key = f"{signal['side']}_{signal['candle_time']}"
+                if not bootstrapped_signal_by_symbol[symbol]:
                     if not is_trading_enabled():
-                        send_telegram(format_pnl_msg(pos, float(live_price)))
+                        bootstrapped_signal_by_symbol[symbol] = True
+                    else:
+                        last_signal_key_by_symbol[symbol] = sig_key
+                        bootstrapped_signal_by_symbol[symbol] = True
+                        print(f"[INFO] [{symbol}] Bootstrapped signal: {sig_key} - chờ tín hiệu mới để vào lệnh.")
                         continue
-                    if pos.get("tp") is not None:
-                        if pos["side"] == "LONG" and float(live_price) >= float(pos["tp"]):
-                            close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
-                            send_telegram(f"🏁 <b>{pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
-                            active_positions.remove(pos)
+
+                if sig_key != last_signal_key_by_symbol[symbol]:
+                    if not is_trading_enabled():
+                        order_seq_by_symbol[symbol] += 1
+                        order_label = f"LỆNH #{order_seq_by_symbol[symbol]}"
+                        send_telegram(format_signal_msg(signal, symbol, order_label))
+                        send_telegram("🧪 <b>Bỏ qua đặt lệnh tự động</b>\nLý do: bot đang ở chế độ READ-ONLY.")
+                        last_signal_key_by_symbol[symbol] = sig_key
+                        continue
+
+                    removable_positions = decide_positions_to_close(active_positions, signal["side"], float(live_price))
+                    for pos in removable_positions:
+                        pnl_snapshot = calc_live_pnl(pos, float(live_price))
+                        close_resp = bing_client.close_position_market(symbol, pos.get("side"), pos.get("quantity"))
+                        close_ok = close_resp and close_resp.get("code") == 0
+                        if close_ok:
+                            active_positions_by_symbol[symbol] = [x for x in active_positions_by_symbol[symbol] if x.get("label") != pos.get("label")]
+                            active_positions = active_positions_by_symbol[symbol]
+                        send_telegram(
+                            "🔄 <b>Điều chỉnh danh mục lệnh</b>\n"
+                            f"Mã: <b>{symbol}</b>\n"
+                            f"Đóng theo phân tích: <b>{pos.get('label')}</b> ({pos.get('side')})\n"
+                            f"Kết quả đóng lệnh: <b>{'Thành công' if close_ok else 'Thất bại'}</b>\n"
+                            f"PnL tạm tính khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>\n"
+                            f"Lý do: ưu tiên tín hiệu mới {signal['side']} và giữ tối đa {MAX_ACTIVE_ORDERS} lệnh.\n"
+                            f"Chi tiết API: <b>{(close_resp or {}).get('msg', 'N/A')}</b>"
+                        )
+
+                    if len(active_positions) >= MAX_ACTIVE_ORDERS:
+                        print(f"[INFO] [{symbol}] Đã đạt tối đa số lệnh giữ, bỏ qua tín hiệu mới.")
+                        last_signal_key_by_symbol[symbol] = sig_key
+                        continue
+
+                    order_seq_by_symbol[symbol] += 1
+                    order_label = f"LỆNH #{order_seq_by_symbol[symbol]}"
+                    send_telegram(format_signal_msg(signal, symbol, order_label))
+                    last_signal_key_by_symbol[symbol] = sig_key
+                    last_price = float(live_price)
+                    order_signal = dict(signal)
+                    order_signal["tp"], order_signal["sl"], levels_changed = normalize_tp_sl_by_entry(
+                        order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl")
+                    )
+                    rr_aligned_tp, rr_aligned_sl, rr_changed = align_tp_sl_with_rr(
+                        order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl"), signal.get("rr")
+                    )
+                    order_signal["tp"], order_signal["sl"] = rr_aligned_tp, rr_aligned_sl
+                    levels_changed = levels_changed or rr_changed
+                    pre_safe_tp, pre_safe_sl = order_signal["tp"], order_signal["sl"]
+                    order_signal["tp"], order_signal["sl"] = enforce_tp_sl_safety(
+                        order_signal["side"], last_price, order_signal["tp"], order_signal["sl"], last_price
+                    )
+                    rr_final_tp, rr_final_sl, rr_final_changed = align_tp_sl_with_rr(
+                        order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl"), signal.get("rr")
+                    )
+                    order_signal["tp"], order_signal["sl"] = sanitize_tp_sl(
+                        order_signal["side"], rr_final_tp, rr_final_sl, last_price
+                    )
+                    levels_changed = levels_changed or (pre_safe_tp != order_signal["tp"] or pre_safe_sl != order_signal["sl"])
+                    levels_changed = levels_changed or rr_final_changed
+                    effective_rr = calc_rr_from_levels(order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl"))
+                    if effective_rr is not None:
+                        order_signal["rr"] = effective_rr
+                    if levels_changed:
+                        send_telegram(
+                            "🛠️ <b>Đã hiệu chỉnh TP/SL trước khi vào lệnh</b>\n"
+                            f"Mã: <b>{symbol}</b>\n"
+                            f"TP: <b>{format_price(order_signal['tp'])}</b> | SL: <b>{format_price(order_signal['sl'])}</b>\n"
+                            f"R:R thực tế theo entry: <b>1:{order_signal.get('rr', signal.get('rr', RR)):.2f}</b>\n"
+                            f"Tiêu chí: TP tối thiểu {MIN_TP_PCT:.2f}% và SL tối thiểu {MIN_SL_PCT:.2f}% so với entry."
+                        )
+
+                    quantity = calc_order_quantity(last_price, ORDER_NOTIONAL_USDT)
+                    order = bing_client.place_market_order(
+                        symbol, "BUY" if signal['side'] == 'LONG' else "SELL", signal['side'], quantity,
+                        order_signal['tp'], order_signal['sl']
+                    )
+                    print(f"[{symbol}] Order Result: {order}")
+                    if order and order.get("code") == 0:
+                        fill_price = extract_order_avg_price(order, last_price)
+                        send_telegram(format_order_result_msg(order_signal, symbol, order, order_label, fill_price))
+                        protection_result = bing_client.add_missing_tp_sl(symbol, signal["side"], order_signal.get("tp"), order_signal.get("sl"))
+                        exchange_pos = (protection_result or {}).get("position")
+                        if exchange_pos:
+                            has_tp = exchange_pos.get("tp") is not None
+                            has_sl = exchange_pos.get("sl") is not None
+                            if not (has_tp and has_sl):
+                                send_telegram(
+                                    "⚠️ <b>Cảnh báo:</b> Lệnh đã khớp nhưng chưa thấy đủ TP/SL trên sàn.\n"
+                                    f"Mã: <b>{symbol}</b>\n"
+                                    f"TP: <b>{'Có' if has_tp else 'Thiếu'}</b> | SL: <b>{'Có' if has_sl else 'Thiếu'}</b>\n"
+                                    "Vui lòng kiểm tra lại trên BingX."
+                                )
+                            elif protection_result.get("tp_added") or protection_result.get("sl_added"):
+                                send_telegram(
+                                    "🛡️ <b>Đã bổ sung TP/SL sau khi vào lệnh</b>\n"
+                                    f"Mã: <b>{symbol}</b>\n"
+                                    f"TP thêm mới: <b>{'Có' if protection_result.get('tp_added') else 'Không'}</b> | "
+                                    f"SL thêm mới: <b>{'Có' if protection_result.get('sl_added') else 'Không'}</b>"
+                                )
+
+                        active_positions_by_symbol[symbol].append({
+                            "label": order_label,
+                            "side": signal["side"],
+                            "entry": fill_price,
+                            "quantity": float(quantity),
+                            "tp": exchange_pos.get("tp") if exchange_pos and exchange_pos.get("tp") is not None else order_signal.get("tp"),
+                            "sl": exchange_pos.get("sl") if exchange_pos and exchange_pos.get("sl") is not None else order_signal.get("sl"),
+                            "opened_at": now_vn()
+                        })
+                        last_pnl_notify_ts_by_symbol[symbol] = 0
+                    else:
+                        err_msg = (order or {}).get("msg", "Không rõ lỗi")
+                        send_telegram(
+                            "❌ <b>Đặt lệnh thất bại</b>\n"
+                            f"Mã: <b>{symbol}</b>\n"
+                            f"🆔 Mã lệnh: <b>{order_label}</b>\n"
+                            f"Lý do: <b>{err_msg}</b>"
+                        )
+
+            elif (not active_positions) and (time.time() - last_status_notify_ts_by_symbol[symbol] >= 3600):
+                send_telegram(format_status_msg(symbol, live_price, candle_time))
+                last_status_notify_ts_by_symbol[symbol] = time.time()
+
+            if active_positions:
+                now_ts = time.time()
+                if now_ts - last_pnl_notify_ts_by_symbol[symbol] >= 60:
+                    if is_trading_enabled():
+                        exchange_pos = bing_client.get_open_position(symbol)
+                        if not exchange_pos:
+                            send_telegram(f"✅ <b>{symbol}</b>: Không còn vị thế mở trên BingX\nXóa danh sách lệnh đang theo dõi.")
+                            active_positions_by_symbol[symbol] = []
+                            last_pnl_notify_ts_by_symbol[symbol] = now_ts
                             continue
-                        if pos["side"] == "SHORT" and float(live_price) <= float(pos["tp"]):
-                            close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
-                            send_telegram(f"🏁 <b>{pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
-                            active_positions.remove(pos)
+
+                    for pos in list(active_positions):
+                        if not is_trading_enabled():
+                            send_telegram(f"📌 <b>{symbol}</b>\n" + format_pnl_msg(pos, float(live_price)))
                             continue
-                    if pos.get("sl") is not None:
-                        if pos["side"] == "LONG" and float(live_price) <= float(pos["sl"]):
-                            close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
-                            send_telegram(f"🛑 <b>{pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
-                            active_positions.remove(pos)
-                            continue
-                        if pos["side"] == "SHORT" and float(live_price) >= float(pos["sl"]):
-                            close_resp = bing_client.close_position_market(pos["side"], pos.get("quantity"))
-                            send_telegram(f"🛑 <b>{pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
-                            active_positions.remove(pos)
-                            continue
-                    send_telegram(format_pnl_msg(pos, float(live_price)))
-                last_pnl_notify_ts = now_ts
+                        if pos.get("tp") is not None:
+                            if pos["side"] == "LONG" and float(live_price) >= float(pos["tp"]):
+                                close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
+                                send_telegram(f"🏁 <b>{symbol} - {pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
+                                active_positions_by_symbol[symbol].remove(pos)
+                                continue
+                            if pos["side"] == "SHORT" and float(live_price) <= float(pos["tp"]):
+                                close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
+                                send_telegram(f"🏁 <b>{symbol} - {pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
+                                active_positions_by_symbol[symbol].remove(pos)
+                                continue
+                        if pos.get("sl") is not None:
+                            if pos["side"] == "LONG" and float(live_price) <= float(pos["sl"]):
+                                close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
+                                send_telegram(f"🛑 <b>{symbol} - {pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
+                                active_positions_by_symbol[symbol].remove(pos)
+                                continue
+                            if pos["side"] == "SHORT" and float(live_price) >= float(pos["sl"]):
+                                close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
+                                send_telegram(f"🛑 <b>{symbol} - {pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>")
+                                active_positions_by_symbol[symbol].remove(pos)
+                                continue
+                        send_telegram(f"📌 <b>{symbol}</b>\n" + format_pnl_msg(pos, float(live_price)))
+                    last_pnl_notify_ts_by_symbol[symbol] = now_ts
 
         time.sleep(10)
     except Exception as e:
