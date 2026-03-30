@@ -49,6 +49,8 @@ if not SYMBOLS:
     SYMBOLS = [os.environ.get("BINGX_SYMBOL", "NCCOGOLD2USD-USDT")]
 SYMBOL = SYMBOLS[0]
 INTERVAL         = os.environ.get("INTERVAL", "15m")
+SCALP_INTERVALS_RAW = os.environ.get("SCALP_INTERVALS", "5m,15m,1h")
+SWING_INTERVALS_RAW = os.environ.get("SWING_INTERVALS", "4h")
 RR               = float(os.environ.get("RR", "2.0"))
 ORDER_NOTIONAL_USDT = float(os.environ.get("ORDER_NOTIONAL_USDT", "1000"))
 LEVERAGE = int(os.environ.get("LEVERAGE", "100"))
@@ -58,6 +60,7 @@ MIN_SL_PCT = float(os.environ.get("MIN_SL_PCT", "0.20"))
 SCALP_RR_TARGET = float(os.environ.get("SCALP_RR_TARGET", "1.4"))
 SCALP_RR_MIN = float(os.environ.get("SCALP_RR_MIN", "1.0"))
 SCALP_RR_MAX = float(os.environ.get("SCALP_RR_MAX", "1.8"))
+SCALP_MIN_QUALITY_SCORE = float(os.environ.get("SCALP_MIN_QUALITY_SCORE", "1.8"))
 SL_BUFFER_PCT = float(os.environ.get("SL_BUFFER_PCT", "0.08"))
 SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", "6"))
 MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.15"))
@@ -66,6 +69,21 @@ TREND_LOOKBACK = int(os.environ.get("TREND_LOOKBACK", "20"))
 ALLOW_FALLBACK_SIGNAL = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true").lower() == "true"
 READ_ONLY_MODE = os.environ.get("READ_ONLY_MODE", "false").lower() == "true"
 SIGNAL_ENGINE = os.environ.get("SIGNAL_ENGINE", "auto").lower()  # auto | strict | backtest_v5
+SWING_RR_TARGET = float(os.environ.get("SWING_RR_TARGET", "2.4"))
+
+def parse_intervals(raw_value, fallback):
+    intervals = [s.strip().lower() for s in (raw_value or "").split(",") if s.strip()]
+    return intervals or fallback
+
+VALID_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
+
+def sanitize_intervals(intervals, fallback):
+    valid = [i for i in intervals if i in VALID_INTERVALS]
+    return valid or fallback
+
+SCALP_INTERVALS = sanitize_intervals(parse_intervals(SCALP_INTERVALS_RAW, [INTERVAL]), [INTERVAL])
+SWING_INTERVALS = sanitize_intervals(parse_intervals(SWING_INTERVALS_RAW, ["4h"]), ["4h"])
+SIGNAL_INTERVALS = list(dict.fromkeys(SCALP_INTERVALS + SWING_INTERVALS))
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -91,7 +109,7 @@ def format_vn_time(dt_value, fmt="%d/%m/%Y %H:%M"):
     return dt.strftime(fmt)
 
 def interval_to_minutes(interval):
-    mapping = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
+    mapping = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
     return mapping.get(interval, 15)
 
 def send_telegram(msg):
@@ -812,17 +830,44 @@ def calc_scalp_tp_sl(df, side, entry):
     buffer = max(0.5, buffer_by_pct, atr_val * 0.1)
     min_risk = max(0.5, float(entry) * (MIN_RISK_PCT / 100.0))
 
+    # Điều chỉnh RR theo "độ mạnh xu hướng + biến động":
+    # - Trend mạnh => ưu tiên RR lớn hơn để tối đa hóa lợi nhuận.
+    # - Volatility cao => giảm RR nhẹ để hiện thực lợi nhuận sớm hơn.
+    ema_gap_pct = 0.0
+    if 'ema50' in df.columns and 'ema200' in df.columns:
+        ema50 = float(df['ema50'].iloc[-2])
+        ema200 = float(df['ema200'].iloc[-2])
+        base = max(abs(float(entry)), 1e-9)
+        ema_gap_pct = abs(ema50 - ema200) / base * 100.0
+
+    vol_factor = 1.0
+    if atr_val > 0:
+        atr_pct = (atr_val / max(abs(float(entry)), 1e-9)) * 100.0
+        if atr_pct >= 0.9:
+            vol_factor = 0.92
+        elif atr_pct <= 0.25:
+            vol_factor = 1.05
+
+    trend_factor = 1.0
+    if ema_gap_pct >= 1.0:
+        trend_factor = 1.12
+    elif ema_gap_pct >= 0.5:
+        trend_factor = 1.06
+    elif ema_gap_pct <= 0.2:
+        trend_factor = 0.95
+
+    rr_used = SCALP_RR_TARGET * trend_factor * vol_factor
+    rr_used = min(max(rr_used, SCALP_RR_MIN), SCALP_RR_MAX)
+
     if side == "LONG":
         structure_sl = float(recent['low'].min()) - buffer
         risk = max(float(entry) - structure_sl, min_risk)
         sl = float(entry) - risk
-        rr_used = min(max(SCALP_RR_TARGET, SCALP_RR_MIN), SCALP_RR_MAX)
         tp = float(entry) + (risk * rr_used)
     else:
         structure_sl = float(recent['high'].max()) + buffer
         risk = max(structure_sl - float(entry), min_risk)
         sl = float(entry) + risk
-        rr_used = min(max(SCALP_RR_TARGET, SCALP_RR_MIN), SCALP_RR_MAX)
         tp = float(entry) - (risk * rr_used)
 
     return round(tp, 2), round(sl, 2), rr_used
@@ -875,6 +920,15 @@ def scan_signal(df):
     in_discount = close_price <= dealing_range_mid
     in_premium = close_price >= dealing_range_mid
 
+    # Chấm điểm chất lượng setup để lọc bớt lệnh xác suất thấp.
+    trend_strength = abs(ema50 - ema200) / max(close_price, 1e-9) * 100.0
+    quality_score = 0.0
+    quality_score += 1.0 if bullish_bias or bearish_bias else 0.0
+    quality_score += 1.0 if liquidity_sweep_low or liquidity_sweep_high else 0.0
+    quality_score += 0.8 if mss_bull or mss_bear else 0.0
+    quality_score += min(0.8, trend_strength * 0.8)
+    quality_score += min(0.6, atr_pct * 0.25)
+
     long_strict = bullish_bias and liquidity_sweep_low and mss_bull and in_discount
     short_strict = bearish_bias and liquidity_sweep_high and mss_bear and in_premium
 
@@ -887,7 +941,8 @@ def scan_signal(df):
     long_fallback = ALLOW_FALLBACK_SIGNAL and bullish_bias and mss_bull and near_ema50
     short_fallback = ALLOW_FALLBACK_SIGNAL and bearish_bias and mss_bear and near_ema50
 
-    if long_strict or long_smc_lite or long_fallback:
+    allow_long = long_strict or (long_smc_lite and quality_score >= SCALP_MIN_QUALITY_SCORE) or (long_fallback and quality_score >= (SCALP_MIN_QUALITY_SCORE + 0.2))
+    if allow_long:
         e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "LONG", e)
         if tp is None or sl is None:
@@ -904,12 +959,14 @@ def scan_signal(df):
             'sl': sl,
             'tp': tp,
             'rr': rr_used,
+            'quality_score': round(quality_score, 2),
             'signal_mode': mode,
             'source': 'BINGX',
             'candle_time': str(last_closed['datetime'])
         }
 
-    if short_strict or short_smc_lite or short_fallback:
+    allow_short = short_strict or (short_smc_lite and quality_score >= SCALP_MIN_QUALITY_SCORE) or (short_fallback and quality_score >= (SCALP_MIN_QUALITY_SCORE + 0.2))
+    if allow_short:
         e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "SHORT", e)
         if tp is None or sl is None:
@@ -926,6 +983,7 @@ def scan_signal(df):
             'sl': sl,
             'tp': tp,
             'rr': rr_used,
+            'quality_score': round(quality_score, 2),
             'signal_mode': mode,
             'source': 'BINGX',
             'candle_time': str(last_closed['datetime'])
@@ -942,6 +1000,50 @@ def scan_signal(df):
 
     return None
 
+def scan_swing_signal(df):
+    """
+    Tín hiệu swing: tái dùng logic backtest_v5 và nâng RR mục tiêu cho lệnh giữ dài hơn.
+    """
+    base = scan_signal_backtest_v5(df)
+    if not base:
+        return None
+
+    signal = dict(base)
+    signal["strategy"] = "swing"
+    signal["signal_mode"] = "swing_backtest_v5"
+
+    entry = float(signal.get("entry", 0) or 0)
+    sl = float(signal.get("sl", 0) or 0)
+    if entry > 0 and sl > 0:
+        if signal["side"] == "LONG":
+            risk = entry - sl
+            if risk > 0:
+                rr_used = max(float(signal.get("rr", RR) or RR), SWING_RR_TARGET)
+                signal["rr"] = rr_used
+                signal["tp"] = round(entry + risk * rr_used, 2)
+        else:
+            risk = sl - entry
+            if risk > 0:
+                rr_used = max(float(signal.get("rr", RR) or RR), SWING_RR_TARGET)
+                signal["rr"] = rr_used
+                signal["tp"] = round(entry - risk * rr_used, 2)
+
+    signal["quality_score"] = round(float(signal.get("quality_score", 2.1)), 2)
+    return signal
+
+def pick_best_signal(signal_candidates):
+    if not signal_candidates:
+        return None
+    # Ưu tiên quality_score cao hơn, sau đó RR cao hơn.
+    return max(
+        signal_candidates,
+        key=lambda s: (
+            float(s.get("quality_score", 0) or 0),
+            float(s.get("rr", 0) or 0),
+            1 if s.get("strategy") == "swing" else 0,
+        ),
+    )
+
 def get_vst_balance_text():
     if not has_api_credentials():
         return "N/A (no API key)"
@@ -955,6 +1057,8 @@ def format_startup_msg(vst_balance):
         f"💵 Số dư: <b>{vst_balance:.4f} VST</b>\n"
         f"🧭 Chế độ: <b>{mode_text}</b>\n"
         f"📚 Danh mục: <b>{', '.join(SYMBOLS)}</b>\n"
+        f"⏱️ Scalp TF: <b>{', '.join(SCALP_INTERVALS)}</b>\n"
+        f"📈 Swing TF: <b>{', '.join(SWING_INTERVALS)}</b>\n"
         f"🧠 Signal engine: <b>{engine_used}</b> (config={SIGNAL_ENGINE})\n"
         f"🕒 Thời gian: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
@@ -967,17 +1071,23 @@ def format_signal_msg(signal, symbol, order_label=None):
         fallback_rr=signal.get("rr", SCALP_RR_TARGET), decimals=1
     )
     signal_mode = signal.get("signal_mode", "strict")
+    quality_score = signal.get("quality_score")
+    quality_text = f"{float(quality_score):.2f}" if quality_score is not None else "N/A"
+    tf = signal.get("interval", INTERVAL)
+    strategy = signal.get("strategy", "scalp")
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     signal_source = signal.get("source", DATA_SOURCE)
     return (
-        f"{emoji} <b>TÍN HIỆU SMC - {symbol} {INTERVAL}</b>\n\n"
+        f"{emoji} <b>TÍN HIỆU SMC - {symbol} {tf}</b>\n\n"
         f"{order_line}"
         f"📌 Lệnh      : <b>{side_text}</b>\n"
+        f"🧩 Chiến lược: <b>{strategy}</b>\n"
         f"💰 Giá hiện tại : <b>{format_price(signal['entry'])}</b>\n"
         f"🎯 Vào lệnh  : <b>{format_price(signal['entry'])}</b>\n"
         f"🛑 Cắt lỗ    : <b>{format_price(signal['sl'])}</b>\n"
         f"✅ Chốt lời  : <b>{format_price(signal['tp'])}</b>\n"
         f"📊 R:R       : <b>{rr_text}</b>\n"
+        f"⭐ Quality   : <b>{quality_text}</b>\n"
         f"🧠 Mode      : <b>{signal_mode}</b>\n\n"
         f"💵 Số dư VST : <b>{get_vst_balance_text()}</b>\n"
         f"🔌 Nguồn dữ liệu: <b>{signal_source}</b>\n"
@@ -1118,18 +1228,19 @@ def decide_positions_to_close(active_positions, incoming_side, live_price):
 # ==========================================
 # 4. BACKGROUND FETCH & MAIN LOOP
 # ==========================================
-_df_cache = {symbol: None for symbol in SYMBOLS}; _lock = threading.Lock()
+_df_cache = {symbol: {} for symbol in SYMBOLS}; _lock = threading.Lock()
 def _bg_fetcher():
     while True:
         try:
             for symbol in SYMBOLS:
-                df = fetch_data(symbol, INTERVAL)
-                if df is None:
-                    continue
-                df = add_indicators(df)
-                with _lock:
-                    _df_cache[symbol] = df
-                print(f"[BG] Updated {symbol} | Close: {df['close'].iloc[-1]}")
+                for tf in SIGNAL_INTERVALS:
+                    df = fetch_data(symbol, tf)
+                    if df is None:
+                        continue
+                    df = add_indicators(df)
+                    with _lock:
+                        _df_cache[symbol][tf] = df
+                    print(f"[BG] Updated {symbol} {tf} | Close: {df['close'].iloc[-1]}")
         except: pass
         time.sleep(30)
 
@@ -1165,23 +1276,48 @@ while True:
     try:
         for symbol in SYMBOLS:
             with _lock:
-                df = _df_cache.get(symbol)
-            if df is None:
+                symbol_frames = dict(_df_cache.get(symbol) or {})
+            if not symbol_frames:
                 continue
 
             active_positions = active_positions_by_symbol[symbol]
-            last_closed = df.iloc[-2]
+            primary_df = symbol_frames.get(INTERVAL) or next(iter(symbol_frames.values()))
+            if primary_df is None or len(primary_df) < 3:
+                continue
+            last_closed = primary_df.iloc[-2]
             candle_time = str(last_closed["datetime"])
             live_price = bing_client.get_last_price(symbol)
             if live_price is None:
                 live_price = float(last_closed["close"])
 
-            signal = scan_signal(df)
+            candidates = []
+            for tf in SCALP_INTERVALS:
+                df_tf = symbol_frames.get(tf)
+                if df_tf is None or len(df_tf) < 3:
+                    continue
+                scalp_signal = scan_signal(df_tf)
+                if scalp_signal:
+                    scalp_signal = dict(scalp_signal)
+                    scalp_signal["interval"] = tf
+                    scalp_signal["strategy"] = "scalp"
+                    candidates.append(scalp_signal)
+
+            for tf in SWING_INTERVALS:
+                df_tf = symbol_frames.get(tf)
+                if df_tf is None or len(df_tf) < 3:
+                    continue
+                swing_signal = scan_swing_signal(df_tf)
+                if swing_signal:
+                    swing_signal = dict(swing_signal)
+                    swing_signal["interval"] = tf
+                    candidates.append(swing_signal)
+
+            signal = pick_best_signal(candidates)
             if signal:
                 if signal.get("source", DATA_SOURCE) != "BINGX":
                     print(f"[WARN] Bỏ qua tín hiệu do nguồn không phải BingX: {signal.get('source')}")
                     continue
-                sig_key = f"{signal['side']}_{signal['candle_time']}"
+                sig_key = f"{signal['side']}_{signal.get('strategy', 'scalp')}_{signal.get('interval', INTERVAL)}_{signal['candle_time']}"
                 if not bootstrapped_signal_by_symbol[symbol]:
                     if not is_trading_enabled():
                         bootstrapped_signal_by_symbol[symbol] = True
