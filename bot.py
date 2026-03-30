@@ -1320,7 +1320,7 @@ def format_pnl_msg(position, last_price):
     )
     order_label = position.get("label", "LỆNH")
     return (
-        f"{pnl_emoji} <b>Theo dõi lệnh khi PnL thay đổi mỗi 10%</b>\n\n"
+        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi PnL chạm mốc 10% mới</b>\n\n"
         f"🆔 Mã lệnh  : <b>{order_label}</b>\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
@@ -1356,6 +1356,21 @@ def calc_live_pnl_pct(position, last_price):
     notional_base = calc_position_notional_base(position)
     pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
     return pnl_pct
+
+def calc_pnl_notify_bucket(pnl_pct):
+    """
+    Bucket thông báo theo mốc 10% dựa trên độ lớn tuyệt đối của PnL%.
+    Ví dụ:
+      +0.11%  -> 0
+      -9.90%  -> 0
+      +10.01% -> +1
+      -10.01% -> -1
+    """
+    pct = float(pnl_pct or 0.0)
+    magnitude_bucket = int(math.floor(abs(pct) / 10.0))
+    if magnitude_bucket == 0:
+        return 0
+    return magnitude_bucket if pct > 0 else -magnitude_bucket
 
 def format_closed_positions_summary(symbol, total_pnl):
     emoji = "🟢" if total_pnl >= 0 else "🔴"
@@ -1777,7 +1792,7 @@ while True:
 
                     label = pos.get("label", "")
                     pnl_pct = calc_live_pnl_pct(pos, float(live_price))
-                    pnl_bucket = math.trunc(pnl_pct / 10.0)
+                    pnl_bucket = calc_pnl_notify_bucket(pnl_pct)
                     prev_bucket = last_pnl_bucket_by_symbol[symbol].get(label)
                     if prev_bucket is None or pnl_bucket != prev_bucket:
                         send_telegram(f"📌 <b>{symbol}</b>\n" + format_pnl_msg(pos, float(live_price)))
