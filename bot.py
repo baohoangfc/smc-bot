@@ -1303,18 +1303,15 @@ def extract_order_avg_price(order_result, fallback_price):
 
 def format_pnl_msg(position, last_price):
     side = position["side"]
-    qty = position["quantity"]
-    entry = position["entry"]
-    pnl = position.get("unrealizedProfit")
-    if pnl is None:
-        if side == "LONG":
-            pnl = (last_price - entry) * qty
-        else:
-            pnl = (entry - last_price) * qty
-    notional_base = position.get("positionValue") or ORDER_NOTIONAL_USDT
+    qty = float(position.get("quantity", 0) or 0)
+    entry = float(position.get("entry", 0) or 0)
+    pnl = calc_live_pnl(position, last_price)
+    if qty <= 0 or entry <= 0:
+        pnl = float(position.get("unrealizedProfit", 0) or 0)
+    notional_base = calc_position_notional_base(position)
     pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-    price_to_show = position.get("markPrice") or last_price
+    price_to_show = float(last_price)
     tp_text = format_price(position.get("tp")) if position.get("tp") is not None else "Chưa có"
     sl_text = format_price(position.get("sl")) if position.get("sl") is not None else "Chưa có"
     rr_text = format_rr_text(
@@ -1340,13 +1337,23 @@ def calc_live_pnl(position, last_price):
     side = position.get("side")
     qty = float(position.get("quantity", 0) or 0)
     entry = float(position.get("entry", 0) or 0)
+    last_price = float(last_price or 0)
+    if qty <= 0 or entry <= 0 or last_price <= 0:
+        return float(position.get("unrealizedProfit", 0) or 0)
     if side == "LONG":
         return (last_price - entry) * qty
     return (entry - last_price) * qty
 
+def calc_position_notional_base(position):
+    qty = float(position.get("quantity", 0) or 0)
+    entry = float(position.get("entry", 0) or 0)
+    notional_entry = abs(entry * qty)
+    api_position_value = float(position.get("positionValue", 0) or 0)
+    return api_position_value if api_position_value > 0 else (notional_entry if notional_entry > 0 else ORDER_NOTIONAL_USDT)
+
 def calc_live_pnl_pct(position, last_price):
     pnl = calc_live_pnl(position, last_price)
-    notional_base = position.get("positionValue") or ORDER_NOTIONAL_USDT
+    notional_base = calc_position_notional_base(position)
     pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
     return pnl_pct
 
