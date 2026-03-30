@@ -62,9 +62,13 @@ MIN_SL_PCT = float(os.environ.get("MIN_SL_PCT", "0.20"))
 SCALP_RR_TARGET = float(os.environ.get("SCALP_RR_TARGET", "1.4"))
 SCALP_RR_MIN = float(os.environ.get("SCALP_RR_MIN", "1.0"))
 SCALP_RR_MAX = float(os.environ.get("SCALP_RR_MAX", "1.8"))
+SCALP_RR_MAX_HIGH_QUALITY = float(os.environ.get("SCALP_RR_MAX_HIGH_QUALITY", "2.20"))
+SCALP_RR_MAX_MED_QUALITY = float(os.environ.get("SCALP_RR_MAX_MED_QUALITY", "1.80"))
+QUALITY_HIGH_THRESHOLD = float(os.environ.get("QUALITY_HIGH_THRESHOLD", "2.50"))
+QUALITY_MED_THRESHOLD = float(os.environ.get("QUALITY_MED_THRESHOLD", "2.00"))
 SCALP_MIN_QUALITY_SCORE = float(os.environ.get("SCALP_MIN_QUALITY_SCORE", "1.8"))
 MIN_SIGNAL_QUALITY_SCORE = float(os.environ.get("MIN_SIGNAL_QUALITY_SCORE", "2.00"))
-SL_BUFFER_PCT = float(os.environ.get("SL_BUFFER_PCT", "0.08"))
+SL_BUFFER_PCT = float(os.environ.get("SL_BUFFER_PCT", "0.12"))
 SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", "6"))
 MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.15"))
 MIN_ATR_PCT = float(os.environ.get("MIN_ATR_PCT", "0.03"))
@@ -88,6 +92,11 @@ LIQUIDITY_SOFT_MIN_RR = float(os.environ.get("LIQUIDITY_SOFT_MIN_RR", "1.30"))
 LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", "2.20"))
 HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS", str(MAX_ACTIVE_ORDERS + 1)))
 LOW_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("LOW_LIQUIDITY_MAX_ACTIVE_ORDERS", str(max(1, MAX_ACTIVE_ORDERS - 1))))
+ENTRY_DRIFT_MAX_PCT = float(os.environ.get("ENTRY_DRIFT_MAX_PCT", "0.30"))
+FALLBACK_MIN_QUALITY_SCORE = float(os.environ.get("FALLBACK_MIN_QUALITY_SCORE", "2.50"))
+FALLBACK_REQUIRE_HIGH_LIQUIDITY = os.environ.get("FALLBACK_REQUIRE_HIGH_LIQUIDITY", "true").lower() == "true"
+BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
+BE_OFFSET_PCT = float(os.environ.get("BE_OFFSET_PCT", "0.02"))
 
 def parse_intervals(raw_value, fallback):
     intervals = [s.strip().lower() for s in (raw_value or "").split(",") if s.strip()]
@@ -259,7 +268,7 @@ def update_learning_state(state, symbol, strategy, interval, side, pnl):
     )
     return row
 
-def apply_learning_to_signal(state, symbol, signal):
+def apply_learning_to_signal_v2(state, symbol, signal):
     if not LEARNING_ENABLED or not signal:
         return signal
     strategy = signal.get("strategy", "scalp")
@@ -272,7 +281,11 @@ def apply_learning_to_signal(state, symbol, signal):
     learned_signal = dict(signal)
     win_rate = float(row.get("win_rate", 0.0))
     avg_pnl = float(row.get("avg_pnl", 0.0))
-    quality_adjust = _clamp((win_rate - 0.5) * 0.8 + (avg_pnl / 25.0), -0.6, 0.6)
+
+    # Chuẩn hóa avg_pnl theo notional để learning có tác động tương xứng.
+    norm_base = max(ORDER_NOTIONAL_USDT * 0.02, 1.0)
+    norm_pnl = avg_pnl / norm_base
+    quality_adjust = _clamp((win_rate - 0.5) * 0.8 + norm_pnl * 0.5, -0.6, 0.6)
     learned_signal["quality_score"] = round(float(learned_signal.get("quality_score", 2.0)) + quality_adjust, 2)
     rr_base = float(learned_signal.get("rr", RR) or RR)
     rr_multiplier = _clamp(1.0 + (win_rate - 0.5) * 0.3, 0.9, 1.12)
@@ -284,10 +297,34 @@ def apply_learning_to_signal(state, symbol, signal):
     learned_signal["sl"] = sl_new
     learned_signal["rr"] = rr_target
     learned_signal["learning_note"] = (
-        f"win_rate={win_rate:.2f}, avg_pnl={avg_pnl:+.2f}, quality_adj={quality_adjust:+.2f}, rr_mul={rr_multiplier:.2f}"
+        f"win_rate={win_rate:.2f}, avg_pnl={avg_pnl:+.2f}, norm_base={norm_base:.1f}, "
+        f"quality_adj={quality_adjust:+.2f}, rr_mul={rr_multiplier:.2f}"
     )
-    print(f"[LEARN] Apply {key} | {learned_signal['learning_note']}")
+    print(f"[LEARN v2] Apply {key} | {learned_signal['learning_note']}")
     return learned_signal
+
+def get_dynamic_rr_max(quality_score):
+    q = float(quality_score or 0)
+    if q >= QUALITY_HIGH_THRESHOLD:
+        return SCALP_RR_MAX_HIGH_QUALITY
+    if q >= QUALITY_MED_THRESHOLD:
+        return SCALP_RR_MAX_MED_QUALITY
+    return max(SCALP_RR_MIN, SCALP_RR_MAX_MED_QUALITY - 0.3)
+
+def is_entry_still_valid(signal, live_price, max_drift_pct=None):
+    if max_drift_pct is None:
+        max_drift_pct = ENTRY_DRIFT_MAX_PCT
+    entry = float(signal.get("entry") or 0)
+    if entry <= 0 or live_price <= 0:
+        return True
+    drift_pct = abs(live_price - entry) / entry * 100.0
+    if drift_pct > max_drift_pct:
+        print(
+            f"[DRIFT] Entry={entry:.2f}, live={live_price:.2f}, "
+            f"drift={drift_pct:.3f}% > max={max_drift_pct:.2f}% → BỎ QUA"
+        )
+        return False
+    return True
 
 def is_signal_tradeable(signal):
     """
@@ -1034,7 +1071,7 @@ def scan_signal_backtest_v5(df):
         tp = entry - risk*RR
         return {'side': 'SHORT', 'entry': round(entry,2), 'sl': round(sl,2), 'tp': round(tp,2), 'rr': RR, 'signal_mode': 'backtest_v5', 'source': 'BINGX', 'candle_time': str(df['datetime'].iloc[i])}
 
-def calc_scalp_tp_sl(df, side, entry):
+def calc_scalp_tp_sl_v2(df, side, entry, quality_score=2.0):
     """
     Tính TP/SL theo hướng scalp ngắn:
     - SL bám cấu trúc swing gần nhất + buffer nhỏ
@@ -1045,9 +1082,10 @@ def calc_scalp_tp_sl(df, side, entry):
 
     recent = df.iloc[-(SWING_LOOKBACK + 2):-1]
     atr_val = float(df['atr'].iloc[-2]) if 'atr' in df.columns and not pd.isna(df['atr'].iloc[-2]) else 0
-    buffer_by_pct = float(entry) * (SL_BUFFER_PCT / 100.0)
-    buffer = max(0.5, buffer_by_pct, atr_val * 0.1)
-    min_risk = max(0.5, float(entry) * (MIN_RISK_PCT / 100.0))
+    entry_f = float(entry)
+    buffer_by_pct = entry_f * (SL_BUFFER_PCT / 100.0)
+    buffer = max(0.5, buffer_by_pct, atr_val * 0.25)
+    min_risk = max(0.5, entry_f * (MIN_RISK_PCT / 100.0))
 
     # Điều chỉnh RR theo "độ mạnh xu hướng + biến động":
     # - Trend mạnh => ưu tiên RR lớn hơn để tối đa hóa lợi nhuận.
@@ -1056,12 +1094,12 @@ def calc_scalp_tp_sl(df, side, entry):
     if 'ema50' in df.columns and 'ema200' in df.columns:
         ema50 = float(df['ema50'].iloc[-2])
         ema200 = float(df['ema200'].iloc[-2])
-        base = max(abs(float(entry)), 1e-9)
+        base = max(abs(entry_f), 1e-9)
         ema_gap_pct = abs(ema50 - ema200) / base * 100.0
 
     vol_factor = 1.0
     if atr_val > 0:
-        atr_pct = (atr_val / max(abs(float(entry)), 1e-9)) * 100.0
+        atr_pct = (atr_val / max(abs(entry_f), 1e-9)) * 100.0
         if atr_pct >= 0.9:
             vol_factor = 0.92
         elif atr_pct <= 0.25:
@@ -1076,20 +1114,44 @@ def calc_scalp_tp_sl(df, side, entry):
         trend_factor = 0.95
 
     rr_used = SCALP_RR_TARGET * trend_factor * vol_factor
-    rr_used = min(max(rr_used, SCALP_RR_MIN), SCALP_RR_MAX)
+    rr_ceiling = get_dynamic_rr_max(quality_score)
+    rr_used = min(max(rr_used, SCALP_RR_MIN), rr_ceiling)
 
     if side == "LONG":
         structure_sl = float(recent['low'].min()) - buffer
-        risk = max(float(entry) - structure_sl, min_risk)
-        sl = float(entry) - risk
-        tp = float(entry) + (risk * rr_used)
+        risk = max(entry_f - structure_sl, min_risk)
+        if atr_val > 0 and risk < atr_val * 0.5:
+            risk = atr_val * 0.5
+        sl = entry_f - risk
+        tp = entry_f + (risk * rr_used)
     else:
         structure_sl = float(recent['high'].max()) + buffer
-        risk = max(structure_sl - float(entry), min_risk)
-        sl = float(entry) + risk
-        tp = float(entry) - (risk * rr_used)
+        risk = max(structure_sl - entry_f, min_risk)
+        if atr_val > 0 and risk < atr_val * 0.5:
+            risk = atr_val * 0.5
+        sl = entry_f + risk
+        tp = entry_f - (risk * rr_used)
 
     return round(tp, 2), round(sl, 2), rr_used
+
+def _scan_signal_fallback_section(df):
+    if not ALLOW_FALLBACK_SIGNAL:
+        return None
+    if FALLBACK_REQUIRE_HIGH_LIQUIDITY and not is_high_liquidity_time(now_vn()):
+        print("[FALLBACK] Ngoài giờ thanh khoản cao → bỏ qua fallback signal")
+        return None
+    backup_signal = scan_signal_backtest_v5(df)
+    if not backup_signal:
+        return None
+    quality = float(backup_signal.get("quality_score", 0) or 0)
+    if quality < FALLBACK_MIN_QUALITY_SCORE:
+        print(
+            f"[FALLBACK] quality={quality:.2f} < threshold={FALLBACK_MIN_QUALITY_SCORE:.2f} → bỏ qua"
+        )
+        return None
+    backup_signal = dict(backup_signal)
+    backup_signal["signal_mode"] = "backtest_v5_fallback"
+    return backup_signal
 
 def scan_signal(df):
     if resolve_signal_engine() == "backtest_v5":
@@ -1163,7 +1225,7 @@ def scan_signal(df):
     allow_long = long_strict or (long_smc_lite and quality_score >= SCALP_MIN_QUALITY_SCORE) or (long_fallback and quality_score >= (SCALP_MIN_QUALITY_SCORE + 0.2))
     if allow_long:
         e = round(close_price, 2)
-        tp, sl, rr_used = calc_scalp_tp_sl(df, "LONG", e)
+        tp, sl, rr_used = calc_scalp_tp_sl_v2(df, "LONG", e, quality_score=quality_score)
         if tp is None or sl is None:
             return None
         if long_strict:
@@ -1187,7 +1249,7 @@ def scan_signal(df):
     allow_short = short_strict or (short_smc_lite and quality_score >= SCALP_MIN_QUALITY_SCORE) or (short_fallback and quality_score >= (SCALP_MIN_QUALITY_SCORE + 0.2))
     if allow_short:
         e = round(close_price, 2)
-        tp, sl, rr_used = calc_scalp_tp_sl(df, "SHORT", e)
+        tp, sl, rr_used = calc_scalp_tp_sl_v2(df, "SHORT", e, quality_score=quality_score)
         if tp is None or sl is None:
             return None
         if short_strict:
@@ -1210,14 +1272,7 @@ def scan_signal(df):
 
     # Lưới an toàn cuối: nếu engine strict/fallback chưa ra tín hiệu thì thử logic backtest_v5
     # để hạn chế tình trạng "đứng im" quá lâu khi thị trường đi một chiều mạnh.
-    if ALLOW_FALLBACK_SIGNAL:
-        backup_signal = scan_signal_backtest_v5(df)
-        if backup_signal:
-            backup_signal = dict(backup_signal)
-            backup_signal["signal_mode"] = "backtest_v5_fallback"
-            return backup_signal
-
-    return None
+    return _scan_signal_fallback_section(df)
 
 def scan_swing_signal(df):
     """
@@ -1456,6 +1511,61 @@ def calc_live_pnl_pct(position, last_price):
     pnl_pct = (pnl / margin_base) * 100 if margin_base else 0
     return pnl_pct
 
+def check_breakeven_condition(pos, live_price, symbol=""):
+    if pos.get("be_activated"):
+        return pos
+
+    entry = float(pos.get("entry") or 0)
+    tp = float(pos.get("tp") or 0)
+    sl = float(pos.get("sl") or 0)
+    side = pos.get("side")
+    if entry <= 0 or tp <= 0 or sl <= 0:
+        return pos
+
+    if side == "LONG":
+        full_range = tp - entry
+        if full_range <= 0:
+            return pos
+        progress_pct = (float(live_price) - entry) / full_range * 100.0
+        if progress_pct >= BE_TRIGGER_PCT:
+            new_sl = round(entry * (1 + BE_OFFSET_PCT / 100.0), 2)
+            if new_sl > sl:
+                pos = dict(pos)
+                pos["sl"] = new_sl
+                pos["be_activated"] = True
+                print(
+                    f"[BE] {symbol} {pos.get('label')} LONG: progress={progress_pct:.1f}% "
+                    f"→ dịch SL lên BE {new_sl:.2f}"
+                )
+                send_telegram(
+                    f"🔒 <b>{symbol} - {pos.get('label')}: Kích hoạt Breakeven</b>\n"
+                    f"📈 Lệnh đang lãi {progress_pct:.1f}% tiến đến TP\n"
+                    f"🛑 SL mới: <b>{new_sl:.2f}</b> (Breakeven +{BE_OFFSET_PCT:.2f}%)\n"
+                    f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
+                )
+    else:
+        full_range = entry - tp
+        if full_range <= 0:
+            return pos
+        progress_pct = (entry - float(live_price)) / full_range * 100.0
+        if progress_pct >= BE_TRIGGER_PCT:
+            new_sl = round(entry * (1 - BE_OFFSET_PCT / 100.0), 2)
+            if new_sl < sl:
+                pos = dict(pos)
+                pos["sl"] = new_sl
+                pos["be_activated"] = True
+                print(
+                    f"[BE] {symbol} {pos.get('label')} SHORT: progress={progress_pct:.1f}% "
+                    f"→ dịch SL xuống BE {new_sl:.2f}"
+                )
+                send_telegram(
+                    f"🔒 <b>{symbol} - {pos.get('label')}: Kích hoạt Breakeven</b>\n"
+                    f"📉 Lệnh đang lãi {progress_pct:.1f}% tiến đến TP\n"
+                    f"🛑 SL mới: <b>{new_sl:.2f}</b> (Breakeven +{BE_OFFSET_PCT:.2f}%)\n"
+                    f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
+                )
+    return pos
+
 def should_notify_pnl_change(prev_notified_pct, current_pct, threshold=10.0):
     """
     Gửi thông báo khi PnL% thay đổi ít nhất `threshold` so với lần đã thông báo gần nhất.
@@ -1643,7 +1753,7 @@ while True:
                     scalp_signal = dict(scalp_signal)
                     scalp_signal["interval"] = tf
                     scalp_signal["strategy"] = "scalp"
-                    scalp_signal = apply_learning_to_signal(learning_state, symbol, scalp_signal)
+                    scalp_signal = apply_learning_to_signal_v2(learning_state, symbol, scalp_signal)
                     candidates.append(scalp_signal)
 
             for tf in SWING_INTERVALS:
@@ -1654,7 +1764,7 @@ while True:
                 if swing_signal:
                     swing_signal = dict(swing_signal)
                     swing_signal["interval"] = tf
-                    swing_signal = apply_learning_to_signal(learning_state, symbol, swing_signal)
+                    swing_signal = apply_learning_to_signal_v2(learning_state, symbol, swing_signal)
                     candidates.append(swing_signal)
 
             signal_eval_time = now_vn()
@@ -1671,6 +1781,9 @@ while True:
                 tradeable, tradeable_reason = is_signal_tradeable(signal)
                 if not tradeable:
                     print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {tradeable_reason}")
+                    continue
+                if not is_entry_still_valid(signal, float(live_price)):
+                    print(f"[INFO] [{symbol}] Bỏ qua: giá đã drift xa khỏi entry signal.")
                     continue
                 liquidity_ok, liquidity_reason = passes_liquidity_focus(signal, signal_eval_time)
                 if not liquidity_ok:
@@ -1886,6 +1999,12 @@ while True:
                 }
 
                 for pos in list(active_positions):
+                    pos = check_breakeven_condition(pos, float(live_price), symbol)
+                    for i, tracked in enumerate(active_positions_by_symbol[symbol]):
+                        if tracked.get("label") == pos.get("label"):
+                            active_positions_by_symbol[symbol][i] = pos
+                            break
+                    active_positions = active_positions_by_symbol[symbol]
                     if pos.get("tp") is not None:
                         if pos["side"] == "LONG" and float(live_price) >= float(pos["tp"]):
                             pnl_snapshot = calc_live_pnl(pos, float(live_price))
