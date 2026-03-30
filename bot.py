@@ -116,7 +116,8 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
-    except: pass
+    except Exception as e:
+        print(f"[WARN] send_telegram exception: {e}")
 
 def is_trading_enabled():
     """
@@ -1238,10 +1239,13 @@ def _bg_fetcher():
                     if df is None:
                         continue
                     df = add_indicators(df)
+                    if df is None or len(df) == 0 or "close" not in df.columns:
+                        continue
                     with _lock:
                         _df_cache[symbol][tf] = df
                     print(f"[BG] Updated {symbol} {tf} | Close: {df['close'].iloc[-1]}")
-        except: pass
+        except Exception as e:
+            print(f"[WARN] _bg_fetcher exception: {e}")
         time.sleep(30)
 
 threading.Thread(target=_bg_fetcher, daemon=True).start()
@@ -1281,7 +1285,9 @@ while True:
                 continue
 
             active_positions = active_positions_by_symbol[symbol]
-            primary_df = symbol_frames.get(INTERVAL) or next(iter(symbol_frames.values()))
+            primary_df = symbol_frames.get(INTERVAL)
+            if primary_df is None:
+                primary_df = next(iter(symbol_frames.values()), None)
             if primary_df is None or len(primary_df) < 3:
                 continue
             last_closed = primary_df.iloc[-2]
