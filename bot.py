@@ -63,6 +63,7 @@ SCALP_RR_TARGET = float(os.environ.get("SCALP_RR_TARGET", "1.4"))
 SCALP_RR_MIN = float(os.environ.get("SCALP_RR_MIN", "1.0"))
 SCALP_RR_MAX = float(os.environ.get("SCALP_RR_MAX", "1.8"))
 SCALP_MIN_QUALITY_SCORE = float(os.environ.get("SCALP_MIN_QUALITY_SCORE", "1.8"))
+MIN_SIGNAL_QUALITY_SCORE = float(os.environ.get("MIN_SIGNAL_QUALITY_SCORE", "2.00"))
 SL_BUFFER_PCT = float(os.environ.get("SL_BUFFER_PCT", "0.08"))
 SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", "6"))
 MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.15"))
@@ -74,14 +75,42 @@ SIGNAL_ENGINE = os.environ.get("SIGNAL_ENGINE", "auto").lower()  # auto | strict
 SWING_RR_TARGET = float(os.environ.get("SWING_RR_TARGET", "2.4"))
 MIN_ORDER_RR = float(os.environ.get("MIN_ORDER_RR", "1.0"))
 SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "90"))
+HIGH_QUALITY_THRESHOLD = float(os.environ.get("HIGH_QUALITY_THRESHOLD", "2.60"))
+HIGH_QUALITY_COOLDOWN_FACTOR = float(os.environ.get("HIGH_QUALITY_COOLDOWN_FACTOR", "0.70"))
 LEARNING_ENABLED = os.environ.get("LEARNING_ENABLED", "true").lower() == "true"
 LEARNING_FILE = os.environ.get("LEARNING_FILE", "learning_state.json")
 LEARNING_MIN_TRADES = int(os.environ.get("LEARNING_MIN_TRADES", "5"))
 LEARNING_SAVE_INTERVAL = int(os.environ.get("LEARNING_SAVE_INTERVAL", "60"))
+LIQUIDITY_FOCUS_ENABLED = os.environ.get("LIQUIDITY_FOCUS_ENABLED", "true").lower() == "true"
+LIQUIDITY_FOCUS_MODE = os.environ.get("LIQUIDITY_FOCUS_MODE", "soft").lower()  # soft | strict
+LIQUIDITY_WINDOWS_VN_RAW = os.environ.get("LIQUIDITY_WINDOWS_VN", "14-17,19-23")
+LIQUIDITY_SOFT_MIN_RR = float(os.environ.get("LIQUIDITY_SOFT_MIN_RR", "1.30"))
+LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", "2.20"))
+HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS", str(MAX_ACTIVE_ORDERS + 1)))
+LOW_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("LOW_LIQUIDITY_MAX_ACTIVE_ORDERS", str(max(1, MAX_ACTIVE_ORDERS - 1))))
 
 def parse_intervals(raw_value, fallback):
     intervals = [s.strip().lower() for s in (raw_value or "").split(",") if s.strip()]
     return intervals or fallback
+
+def parse_hour_windows(raw_value):
+    windows = []
+    for chunk in (raw_value or "").split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        if "-" in item:
+            start_raw, end_raw = item.split("-", 1)
+        else:
+            start_raw, end_raw = item, item
+        try:
+            start_h = int(start_raw.strip())
+            end_h = int(end_raw.strip())
+            if 0 <= start_h <= 23 and 0 <= end_h <= 23:
+                windows.append((start_h, end_h))
+        except Exception:
+            continue
+    return windows
 
 VALID_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 
@@ -109,6 +138,7 @@ def sanitize_intervals(intervals, fallback):
 SCALP_INTERVALS = sanitize_intervals(parse_intervals(SCALP_INTERVALS_RAW, [INTERVAL]), [INTERVAL])
 SWING_INTERVALS = sanitize_intervals(parse_intervals(SWING_INTERVALS_RAW, ["4h"]), ["4h"])
 SIGNAL_INTERVALS = list(dict.fromkeys(SCALP_INTERVALS + SWING_INTERVALS))
+LIQUIDITY_WINDOWS_VN = parse_hour_windows(LIQUIDITY_WINDOWS_VN_RAW)
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -128,6 +158,41 @@ def pick_first_float(*values):
         except Exception:
             continue
     return None
+
+def parse_trigger_price(raw_value):
+    """
+    Chuẩn hóa dữ liệu TP/SL trả về từ API BingX.
+    API có thể trả về: số, chuỗi số, JSON string, hoặc dict chứa stopPrice/price.
+    """
+    if raw_value is None:
+        return None
+    parsed_value = raw_value
+    if isinstance(parsed_value, str):
+        stripped = parsed_value.strip()
+        if not stripped:
+            return None
+        try:
+            # Trường hợp chuỗi số đơn giản: "67385.5"
+            direct = float(stripped)
+            if direct > 0:
+                return direct
+        except Exception:
+            pass
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed_value = json.loads(stripped)
+            except Exception:
+                return None
+
+    if isinstance(parsed_value, dict):
+        return pick_first_float(
+            parsed_value.get("stopPrice"),
+            parsed_value.get("price"),
+            parsed_value.get("triggerPrice"),
+            parsed_value.get("avgPrice")
+        )
+
+    return pick_first_float(parsed_value)
 
 def _clamp(value, low, high):
     return max(low, min(high, value))
@@ -559,10 +624,20 @@ class BingXClient:
                 side = "LONG" if qty > 0 else "SHORT"
                 entry = float(p.get("avgPrice", 0) or 0)
                 tp = pick_first_float(
-                    p.get("takeProfit"), p.get("takeProfitPrice"), p.get("tpPrice"), p.get("tp")
+                    parse_trigger_price(p.get("takeProfit")),
+                    parse_trigger_price(p.get("takeProfitPrice")),
+                    parse_trigger_price(p.get("tpPrice")),
+                    parse_trigger_price(p.get("tp")),
+                    parse_trigger_price(p.get("takeProfitOrder")),
+                    parse_trigger_price(p.get("tpOrder"))
                 )
                 sl = pick_first_float(
-                    p.get("stopLoss"), p.get("stopLossPrice"), p.get("slPrice"), p.get("sl")
+                    parse_trigger_price(p.get("stopLoss")),
+                    parse_trigger_price(p.get("stopLossPrice")),
+                    parse_trigger_price(p.get("slPrice")),
+                    parse_trigger_price(p.get("sl")),
+                    parse_trigger_price(p.get("stopLossOrder")),
+                    parse_trigger_price(p.get("slOrder"))
                 )
                 return {
                     "side": side,
@@ -1175,13 +1250,28 @@ def scan_swing_signal(df):
     signal["quality_score"] = round(float(signal.get("quality_score", 2.1)), 2)
     return signal
 
-def pick_best_signal(signal_candidates):
+def signal_priority_score(signal, dt_value=None):
+    quality = float(signal.get("quality_score", 0) or 0)
+    rr_value = float(signal.get("rr", 0) or 0)
+    strategy = signal.get("strategy", "scalp")
+    # RR bị giới hạn trần để tránh score bị méo bởi outlier
+    rr_component = min(max(rr_value, 0.0), 3.0)
+    score = quality * 1.2 + rr_component * 0.8
+    if is_high_liquidity_time(dt_value):
+        score += 0.25 if strategy == "scalp" else 0.10
+    else:
+        score += 0.25 if strategy == "swing" else 0.05
+    return round(score, 4)
+
+def pick_best_signal(signal_candidates, dt_value=None):
     if not signal_candidates:
         return None
-    # Ưu tiên quality_score cao hơn, sau đó RR cao hơn.
+    # Ưu tiên điểm tổng hợp (quality + RR + chiến lược theo bối cảnh thanh khoản),
+    # sau đó mới fallback theo quality và RR.
     return max(
         signal_candidates,
         key=lambda s: (
+            signal_priority_score(s, dt_value),
             float(s.get("quality_score", 0) or 0),
             float(s.get("rr", 0) or 0),
             1 if s.get("strategy") == "swing" else 0,
@@ -1372,6 +1462,66 @@ def calc_pnl_notify_bucket(pnl_pct):
         return 0
     return magnitude_bucket if pct > 0 else -magnitude_bucket
 
+def is_in_hour_window(hour_value, start_h, end_h):
+    if start_h <= end_h:
+        return start_h <= hour_value <= end_h
+    # Window qua ngày, ví dụ: 22-02
+    return hour_value >= start_h or hour_value <= end_h
+
+def is_high_liquidity_time(dt_value=None):
+    if not LIQUIDITY_FOCUS_ENABLED:
+        return True
+    if not LIQUIDITY_WINDOWS_VN:
+        return True
+    dt = dt_value or now_vn()
+    hour_value = int(dt.hour)
+    for start_h, end_h in LIQUIDITY_WINDOWS_VN:
+        if is_in_hour_window(hour_value, start_h, end_h):
+            return True
+    return False
+
+def current_max_active_orders(dt_value=None):
+    if not LIQUIDITY_FOCUS_ENABLED:
+        return max(1, int(MAX_ACTIVE_ORDERS))
+    if is_high_liquidity_time(dt_value):
+        return max(1, int(HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS))
+    return max(1, int(LOW_LIQUIDITY_MAX_ACTIVE_ORDERS))
+
+def passes_quality_gate(signal):
+    quality_now = float(signal.get("quality_score", 0) or 0)
+    if quality_now < MIN_SIGNAL_QUALITY_SCORE:
+        return False, f"Quality thấp ({quality_now:.2f} < {MIN_SIGNAL_QUALITY_SCORE:.2f})"
+    return True, f"Quality đạt ({quality_now:.2f})"
+
+def effective_signal_cooldown(signal):
+    cooldown = max(10, int(SIGNAL_COOLDOWN_SECONDS))
+    quality_now = float(signal.get("quality_score", 0) or 0)
+    if quality_now >= HIGH_QUALITY_THRESHOLD:
+        factor = max(0.3, min(1.0, float(HIGH_QUALITY_COOLDOWN_FACTOR)))
+        cooldown = max(10, int(cooldown * factor))
+    return cooldown
+
+def passes_liquidity_focus(signal, dt_value=None):
+    if not LIQUIDITY_FOCUS_ENABLED:
+        return True, "Liquidity focus tắt"
+    if is_high_liquidity_time(dt_value):
+        return True, "Đang trong khung giờ thanh khoản cao"
+
+    mode = LIQUIDITY_FOCUS_MODE if LIQUIDITY_FOCUS_MODE in {"soft", "strict"} else "soft"
+    if mode == "strict":
+        return False, "Ngoài khung giờ thanh khoản cao (strict mode)"
+
+    rr_now = calc_rr_from_levels(signal.get("side"), signal.get("entry"), signal.get("tp"), signal.get("sl"))
+    if rr_now is None:
+        rr_now = float(signal.get("rr", 0) or 0)
+    quality_now = float(signal.get("quality_score", 0) or 0)
+
+    if rr_now < LIQUIDITY_SOFT_MIN_RR:
+        return False, f"Ngoài giờ thanh khoản cao: RR {rr_now:.2f} < {LIQUIDITY_SOFT_MIN_RR:.2f}"
+    if quality_now < LIQUIDITY_SOFT_MIN_QUALITY:
+        return False, f"Ngoài giờ thanh khoản cao: quality {quality_now:.2f} < {LIQUIDITY_SOFT_MIN_QUALITY:.2f}"
+    return True, "Ngoài giờ thanh khoản cao nhưng đạt ngưỡng soft"
+
 def format_closed_positions_summary(symbol, total_pnl):
     emoji = "🟢" if total_pnl >= 0 else "🔴"
     return (
@@ -1380,7 +1530,7 @@ def format_closed_positions_summary(symbol, total_pnl):
         f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
 
-def decide_positions_to_close(active_positions, incoming_side, live_price):
+def decide_positions_to_close(active_positions, incoming_side, live_price, max_active_orders=MAX_ACTIVE_ORDERS):
     if not active_positions:
         return []
 
@@ -1391,7 +1541,7 @@ def decide_positions_to_close(active_positions, incoming_side, live_price):
         removable.append(worst_opposite)
 
     remaining = len(active_positions) - len(removable)
-    if remaining >= MAX_ACTIVE_ORDERS:
+    if remaining >= max_active_orders:
         candidates = [p for p in active_positions if p not in removable]
         if candidates:
             worst_any = min(candidates, key=lambda p: calc_live_pnl(p, live_price))
@@ -1504,24 +1654,35 @@ while True:
                     swing_signal = apply_learning_to_signal(learning_state, symbol, swing_signal)
                     candidates.append(swing_signal)
 
-            signal = pick_best_signal(candidates)
+            signal_eval_time = now_vn()
+            signal = pick_best_signal(candidates, signal_eval_time)
             if signal:
+                active_limit = current_max_active_orders(signal_eval_time)
                 if signal.get("source", DATA_SOURCE) != "BINGX":
                     print(f"[WARN] Bỏ qua tín hiệu do nguồn không phải BingX: {signal.get('source')}")
+                    continue
+                quality_ok, quality_reason = passes_quality_gate(signal)
+                if not quality_ok:
+                    print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {quality_reason}")
                     continue
                 tradeable, tradeable_reason = is_signal_tradeable(signal)
                 if not tradeable:
                     print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {tradeable_reason}")
                     continue
+                liquidity_ok, liquidity_reason = passes_liquidity_focus(signal, signal_eval_time)
+                if not liquidity_ok:
+                    print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {liquidity_reason}")
+                    continue
                 sig_key = f"{signal['side']}_{signal.get('strategy', 'scalp')}_{signal.get('interval', INTERVAL)}_{signal['candle_time']}"
                 signal_bucket = f"{signal['side']}_{signal.get('strategy', 'scalp')}_{signal.get('interval', INTERVAL)}"
                 now_ts = time.time()
                 last_entry_ts = last_entry_ts_by_symbol[symbol].get(signal_bucket)
-                if last_entry_ts and (now_ts - last_entry_ts < SIGNAL_COOLDOWN_SECONDS):
-                    remaining = int(SIGNAL_COOLDOWN_SECONDS - (now_ts - last_entry_ts))
+                signal_cooldown = effective_signal_cooldown(signal)
+                if last_entry_ts and (now_ts - last_entry_ts < signal_cooldown):
+                    remaining = int(signal_cooldown - (now_ts - last_entry_ts))
                     print(
                         f"[INFO] [{symbol}] Bỏ qua tín hiệu mới do cooldown {signal_bucket}: "
-                        f"còn {max(remaining, 0)}s."
+                        f"còn {max(remaining, 0)}s (cooldown={signal_cooldown}s)."
                     )
                     continue
                 if not bootstrapped_signal_by_symbol[symbol]:
@@ -1545,7 +1706,9 @@ while True:
                         last_signal_key_by_symbol[symbol] = sig_key
                         continue
 
-                    removable_positions = decide_positions_to_close(active_positions, signal["side"], float(live_price))
+                    removable_positions = decide_positions_to_close(
+                        active_positions, signal["side"], float(live_price), active_limit
+                    )
                     for pos in removable_positions:
                         pnl_snapshot = calc_live_pnl(pos, float(live_price))
                         close_resp = bing_client.close_position_market(symbol, pos.get("side"), pos.get("quantity"))
@@ -1565,17 +1728,17 @@ while True:
                             f"Đóng theo phân tích: <b>{pos.get('label')}</b> ({pos.get('side')})\n"
                             f"Kết quả đóng lệnh: <b>{'Thành công' if close_ok else 'Thất bại'}</b>\n"
                             f"PnL tạm tính khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>\n"
-                            f"Lý do: ưu tiên tín hiệu mới {signal['side']} và giữ tối đa {MAX_ACTIVE_ORDERS} lệnh.\n"
+                            f"Lý do: ưu tiên tín hiệu mới {signal['side']} và giữ tối đa {active_limit} lệnh.\n"
                             f"Chi tiết API: <b>{(close_resp or {}).get('msg', 'N/A')}</b>"
                         )
                     if (not active_positions) and removable_positions:
                         send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
                         closed_cycle_pnl_by_symbol[symbol] = 0.0
 
-                    if len(active_positions) >= MAX_ACTIVE_ORDERS:
+                    if len(active_positions) >= active_limit:
                         print(
                             f"[INFO] [{symbol}] Đã đạt tối đa số lệnh giữ, bỏ qua tín hiệu mới. "
-                            f"Lý do chờ: đang giữ {len(active_positions)}/{MAX_ACTIVE_ORDERS} lệnh, "
+                            f"Lý do chờ: đang giữ {len(active_positions)}/{active_limit} lệnh, "
                             f"ưu tiên quản trị rủi ro trước khi mở thêm."
                         )
                         last_signal_key_by_symbol[symbol] = sig_key
@@ -1675,9 +1838,18 @@ while True:
                         )
 
             elif (not active_positions) and (time.time() - last_status_notify_ts_by_symbol[symbol] >= 3600):
+                active_limit = current_max_active_orders(now_vn())
+                liquidity_note = ""
+                if LIQUIDITY_FOCUS_ENABLED and not is_high_liquidity_time(now_vn()):
+                    liquidity_note = (
+                        f" Ngoài khung giờ thanh khoản cao ({LIQUIDITY_WINDOWS_VN_RAW}), "
+                        "bot sẽ lọc tín hiệu chặt hơn."
+                    )
                 wait_reason = (
                     f"Chưa có tín hiệu mới phù hợp ở các TF đang theo dõi "
                     f"({', '.join(SIGNAL_INTERVALS)}), bot tiếp tục quan sát để chờ điểm vào có RR/quality tốt."
+                    f" Ngưỡng quality tối thiểu hiện tại: {MIN_SIGNAL_QUALITY_SCORE:.2f}, "
+                    f"số lệnh tối đa: {active_limit}.{liquidity_note}"
                 )
                 print(f"[INFO] [{symbol}] Chưa vào lệnh. Lý do chờ: {wait_reason}")
                 send_telegram(format_status_msg(symbol, live_price, candle_time, wait_reason))
