@@ -1410,7 +1410,7 @@ def format_pnl_msg(position, last_price):
     )
     order_label = position.get("label", "LỆNH")
     return (
-        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi PnL chạm mốc 10% mới</b>\n\n"
+        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi PnL biến động ±10% so với lần báo trước</b>\n\n"
         f"🆔 Mã lệnh  : <b>{order_label}</b>\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
@@ -1447,20 +1447,14 @@ def calc_live_pnl_pct(position, last_price):
     pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
     return pnl_pct
 
-def calc_pnl_notify_bucket(pnl_pct):
+def should_notify_pnl_change(prev_notified_pct, current_pct, threshold=10.0):
     """
-    Bucket thông báo theo mốc 10% dựa trên độ lớn tuyệt đối của PnL%.
-    Ví dụ:
-      +0.11%  -> 0
-      -9.90%  -> 0
-      +10.01% -> +1
-      -10.01% -> -1
+    Gửi thông báo khi PnL% thay đổi ít nhất `threshold` so với lần đã thông báo gần nhất.
+    Hỗ trợ cả tăng và giảm (ví dụ +10% hoặc -10%).
     """
-    pct = float(pnl_pct or 0.0)
-    magnitude_bucket = int(math.floor(abs(pct) / 10.0))
-    if magnitude_bucket == 0:
-        return 0
-    return magnitude_bucket if pct > 0 else -magnitude_bucket
+    if prev_notified_pct is None:
+        return True
+    return abs(float(current_pct) - float(prev_notified_pct)) >= float(threshold)
 
 def is_in_hour_window(hour_value, start_h, end_h):
     if start_h <= end_h:
@@ -1606,7 +1600,7 @@ if not is_trading_enabled():
 
 last_signal_key_by_symbol = {symbol: None for symbol in SYMBOLS}
 last_status_notify_ts_by_symbol = {symbol: time.time() for symbol in SYMBOLS}
-last_pnl_bucket_by_symbol = {symbol: {} for symbol in SYMBOLS}
+last_pnl_notified_pct_by_symbol = {symbol: {} for symbol in SYMBOLS}
 closed_cycle_pnl_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 bootstrapped_signal_by_symbol = {symbol: False for symbol in SYMBOLS}
 last_entry_ts_by_symbol = {symbol: {} for symbol in SYMBOLS}
@@ -1827,7 +1821,7 @@ while True:
                             "sl": exchange_pos.get("sl") if exchange_pos and exchange_pos.get("sl") is not None else order_signal.get("sl"),
                             "opened_at": now_vn()
                         })
-                        last_pnl_bucket_by_symbol[symbol][order_label] = None
+                        last_pnl_notified_pct_by_symbol[symbol][order_label] = None
                     else:
                         err_msg = (order or {}).get("msg", "Không rõ lỗi")
                         send_telegram(
@@ -1873,13 +1867,13 @@ while True:
                         send_telegram(f"✅ <b>{symbol}</b>: Không còn vị thế mở trên BingX\nXóa danh sách lệnh đang theo dõi.")
                         send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
                         active_positions_by_symbol[symbol] = []
-                        last_pnl_bucket_by_symbol[symbol] = {}
+                        last_pnl_notified_pct_by_symbol[symbol] = {}
                         closed_cycle_pnl_by_symbol[symbol] = 0.0
                         continue
 
                 tracked_labels = {pos.get("label") for pos in active_positions if pos.get("label")}
-                last_pnl_bucket_by_symbol[symbol] = {
-                    label: bucket for label, bucket in last_pnl_bucket_by_symbol[symbol].items() if label in tracked_labels
+                last_pnl_notified_pct_by_symbol[symbol] = {
+                    label: pct for label, pct in last_pnl_notified_pct_by_symbol[symbol].items() if label in tracked_labels
                 }
 
                 for pos in list(active_positions):
@@ -1898,7 +1892,7 @@ while True:
                                 pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
                             )
                             mark_learning_dirty(learning_meta)
-                            last_pnl_bucket_by_symbol[symbol].pop(pos.get("label"), None)
+                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label"), None)
                             if not active_positions_by_symbol[symbol]:
                                 send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
                                 closed_cycle_pnl_by_symbol[symbol] = 0.0
@@ -1917,7 +1911,7 @@ while True:
                                 pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
                             )
                             mark_learning_dirty(learning_meta)
-                            last_pnl_bucket_by_symbol[symbol].pop(pos.get("label"), None)
+                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label"), None)
                             if not active_positions_by_symbol[symbol]:
                                 send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
                                 closed_cycle_pnl_by_symbol[symbol] = 0.0
@@ -1937,7 +1931,7 @@ while True:
                                 pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
                             )
                             mark_learning_dirty(learning_meta)
-                            last_pnl_bucket_by_symbol[symbol].pop(pos.get("label"), None)
+                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label"), None)
                             if not active_positions_by_symbol[symbol]:
                                 send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
                                 closed_cycle_pnl_by_symbol[symbol] = 0.0
@@ -1956,7 +1950,7 @@ while True:
                                 pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
                             )
                             mark_learning_dirty(learning_meta)
-                            last_pnl_bucket_by_symbol[symbol].pop(pos.get("label"), None)
+                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label"), None)
                             if not active_positions_by_symbol[symbol]:
                                 send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
                                 closed_cycle_pnl_by_symbol[symbol] = 0.0
@@ -1964,11 +1958,10 @@ while True:
 
                     label = pos.get("label", "")
                     pnl_pct = calc_live_pnl_pct(pos, float(live_price))
-                    pnl_bucket = calc_pnl_notify_bucket(pnl_pct)
-                    prev_bucket = last_pnl_bucket_by_symbol[symbol].get(label)
-                    if prev_bucket is None or pnl_bucket != prev_bucket:
+                    prev_notified_pct = last_pnl_notified_pct_by_symbol[symbol].get(label)
+                    if should_notify_pnl_change(prev_notified_pct, pnl_pct, threshold=10.0):
                         send_telegram(f"📌 <b>{symbol}</b>\n" + format_pnl_msg(pos, float(live_price)))
-                        last_pnl_bucket_by_symbol[symbol][label] = pnl_bucket
+                        last_pnl_notified_pct_by_symbol[symbol][label] = pnl_pct
 
             maybe_flush_learning_state(learning_state, learning_meta)
 
