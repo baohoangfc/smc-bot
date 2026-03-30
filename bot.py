@@ -1,4 +1,6 @@
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import pandas as pd
 import numpy as np
 import time
@@ -70,12 +72,35 @@ ALLOW_FALLBACK_SIGNAL = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true").lower() 
 READ_ONLY_MODE = os.environ.get("READ_ONLY_MODE", "false").lower() == "true"
 SIGNAL_ENGINE = os.environ.get("SIGNAL_ENGINE", "auto").lower()  # auto | strict | backtest_v5
 SWING_RR_TARGET = float(os.environ.get("SWING_RR_TARGET", "2.4"))
+MIN_ORDER_RR = float(os.environ.get("MIN_ORDER_RR", "1.0"))
+SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "90"))
+LEARNING_ENABLED = os.environ.get("LEARNING_ENABLED", "true").lower() == "true"
+LEARNING_FILE = os.environ.get("LEARNING_FILE", "learning_state.json")
+LEARNING_MIN_TRADES = int(os.environ.get("LEARNING_MIN_TRADES", "5"))
+LEARNING_SAVE_INTERVAL = int(os.environ.get("LEARNING_SAVE_INTERVAL", "60"))
 
 def parse_intervals(raw_value, fallback):
     intervals = [s.strip().lower() for s in (raw_value or "").split(",") if s.strip()]
     return intervals or fallback
 
 VALID_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
+
+HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "15"))
+
+def build_http_session():
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=0.3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+    )
+    adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+HTTP_SESSION = build_http_session()
 
 def sanitize_intervals(intervals, fallback):
     valid = [i for i in intervals if i in VALID_INTERVALS]
@@ -104,6 +129,122 @@ def pick_first_float(*values):
             continue
     return None
 
+def _clamp(value, low, high):
+    return max(low, min(high, value))
+
+def load_learning_state():
+    if not LEARNING_ENABLED:
+        return {}
+    if not os.path.exists(LEARNING_FILE):
+        return {}
+    try:
+        with open(LEARNING_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"[WARN] load_learning_state failed: {e}")
+        return {}
+
+def save_learning_state(state):
+    if not LEARNING_ENABLED:
+        return
+    try:
+        with open(LEARNING_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] save_learning_state failed: {e}")
+
+def mark_learning_dirty(meta):
+    if LEARNING_ENABLED:
+        meta["dirty"] = True
+
+def maybe_flush_learning_state(state, meta, force=False):
+    if not LEARNING_ENABLED:
+        return
+    now_ts = time.time()
+    if not meta.get("dirty"):
+        return
+    last_save_ts = float(meta.get("last_save_ts", 0.0))
+    if force or (now_ts - last_save_ts >= LEARNING_SAVE_INTERVAL):
+        save_learning_state(state)
+        meta["dirty"] = False
+        meta["last_save_ts"] = now_ts
+
+def learning_key(symbol, strategy, interval, side):
+    return f"{symbol}|{strategy}|{interval}|{side}"
+
+def update_learning_state(state, symbol, strategy, interval, side, pnl):
+    key = learning_key(symbol, strategy, interval, side)
+    row = state.get(key, {
+        "symbol": symbol, "strategy": strategy, "interval": interval, "side": side,
+        "trades": 0, "wins": 0, "losses": 0, "pnl_sum": 0.0, "avg_pnl": 0.0, "win_rate": 0.0
+    })
+    row["trades"] += 1
+    if pnl >= 0:
+        row["wins"] += 1
+    else:
+        row["losses"] += 1
+    row["pnl_sum"] = float(row.get("pnl_sum", 0.0)) + float(pnl)
+    row["avg_pnl"] = row["pnl_sum"] / max(row["trades"], 1)
+    row["win_rate"] = float(row["wins"]) / max(row["trades"], 1)
+    state[key] = row
+    print(
+        f"[LEARN] Update {key} | trades={row['trades']} | win_rate={row['win_rate']:.2f} | "
+        f"avg_pnl={row['avg_pnl']:+.2f} | last_pnl={float(pnl):+.2f}"
+    )
+    return row
+
+def apply_learning_to_signal(state, symbol, signal):
+    if not LEARNING_ENABLED or not signal:
+        return signal
+    strategy = signal.get("strategy", "scalp")
+    interval = signal.get("interval", INTERVAL)
+    side = signal.get("side")
+    key = learning_key(symbol, strategy, interval, side)
+    row = state.get(key)
+    if not row or int(row.get("trades", 0)) < LEARNING_MIN_TRADES:
+        return signal
+    learned_signal = dict(signal)
+    win_rate = float(row.get("win_rate", 0.0))
+    avg_pnl = float(row.get("avg_pnl", 0.0))
+    quality_adjust = _clamp((win_rate - 0.5) * 0.8 + (avg_pnl / 25.0), -0.6, 0.6)
+    learned_signal["quality_score"] = round(float(learned_signal.get("quality_score", 2.0)) + quality_adjust, 2)
+    rr_base = float(learned_signal.get("rr", RR) or RR)
+    rr_multiplier = _clamp(1.0 + (win_rate - 0.5) * 0.3, 0.9, 1.12)
+    rr_target = rr_base * rr_multiplier
+    tp_new, sl_new, _ = align_tp_sl_with_rr(
+        side, float(learned_signal.get("entry", 0) or 0), learned_signal.get("tp"), learned_signal.get("sl"), rr_target
+    )
+    learned_signal["tp"] = tp_new
+    learned_signal["sl"] = sl_new
+    learned_signal["rr"] = rr_target
+    learned_signal["learning_note"] = (
+        f"win_rate={win_rate:.2f}, avg_pnl={avg_pnl:+.2f}, quality_adj={quality_adjust:+.2f}, rr_mul={rr_multiplier:.2f}"
+    )
+    print(f"[LEARN] Apply {key} | {learned_signal['learning_note']}")
+    return learned_signal
+
+def is_signal_tradeable(signal):
+    """
+    Lọc tín hiệu trước khi vào lệnh để tránh setup RR quá thấp hoặc thiếu level TP/SL.
+    """
+    if not signal:
+        return False, "Tín hiệu rỗng"
+    side = signal.get("side")
+    entry = signal.get("entry")
+    tp = signal.get("tp")
+    sl = signal.get("sl")
+    rr = calc_rr_from_levels(side, entry, tp, sl)
+    if rr is None:
+        rr = float(signal.get("rr", 0) or 0)
+    if rr <= 0:
+        return False, "RR không hợp lệ"
+    if rr < MIN_ORDER_RR:
+        return False, f"RR thấp ({rr:.2f} < {MIN_ORDER_RR:.2f})"
+    if entry is None or tp is None or sl is None:
+        return False, "Thiếu entry/TP/SL"
+    return True, f"RR={rr:.2f}"
+
 def format_vn_time(dt_value, fmt="%d/%m/%Y %H:%M"):
     dt = pd.to_datetime(dt_value)
     return dt.strftime(fmt)
@@ -114,8 +255,8 @@ def interval_to_minutes(interval):
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                       json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
+    try: HTTP_SESSION.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                           json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=HTTP_TIMEOUT)
     except Exception as e:
         print(f"[WARN] send_telegram exception: {e}")
 
@@ -353,15 +494,17 @@ class BingXClient:
     def _signed_request(self, method, path, params, timeout=15):
         headers = {"X-BX-APIKEY": self.api_key, "Content-Type": "application/x-www-form-urlencoded"}
         signed_query = self._build_signed_query(params)
+        request_timeout = timeout or HTTP_TIMEOUT
         if method.upper() == "GET":
-            r = requests.get(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=timeout)
+            r = HTTP_SESSION.get(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=request_timeout)
         else:
-            r = requests.post(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=timeout)
+            r = HTTP_SESSION.post(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=request_timeout)
         return r.json()
 
     def _public_request(self, path, params=None, timeout=15):
         params = params or {}
-        r = requests.get(f"{BINGX_URL}{path}", params=params, timeout=timeout)
+        request_timeout = timeout or HTTP_TIMEOUT
+        r = HTTP_SESSION.get(f"{BINGX_URL}{path}", params=params, timeout=request_timeout)
         return r.json()
 
     def get_balance_info(self, asset_name="VST"):
@@ -1268,6 +1411,8 @@ threading.Thread(target=_bg_fetcher, daemon=True).start()
 time.sleep(10) # Đợi dữ liệu lần đầu
 
 vst_bal = bing_client.get_vst_balance() if has_api_credentials() else 0.0
+learning_state = load_learning_state()
+learning_meta = {"dirty": False, "last_save_ts": time.time()}
 active_positions_by_symbol = {symbol: [] for symbol in SYMBOLS}
 order_seq_by_symbol = {symbol: 0 for symbol in SYMBOLS}
 for symbol in SYMBOLS:
@@ -1292,6 +1437,7 @@ last_status_notify_ts_by_symbol = {symbol: time.time() for symbol in SYMBOLS}
 last_pnl_bucket_by_symbol = {symbol: {} for symbol in SYMBOLS}
 closed_cycle_pnl_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 bootstrapped_signal_by_symbol = {symbol: False for symbol in SYMBOLS}
+last_entry_ts_by_symbol = {symbol: {} for symbol in SYMBOLS}
 while True:
     try:
         for symbol in SYMBOLS:
@@ -1322,6 +1468,7 @@ while True:
                     scalp_signal = dict(scalp_signal)
                     scalp_signal["interval"] = tf
                     scalp_signal["strategy"] = "scalp"
+                    scalp_signal = apply_learning_to_signal(learning_state, symbol, scalp_signal)
                     candidates.append(scalp_signal)
 
             for tf in SWING_INTERVALS:
@@ -1332,6 +1479,7 @@ while True:
                 if swing_signal:
                     swing_signal = dict(swing_signal)
                     swing_signal["interval"] = tf
+                    swing_signal = apply_learning_to_signal(learning_state, symbol, swing_signal)
                     candidates.append(swing_signal)
 
             signal = pick_best_signal(candidates)
@@ -1339,7 +1487,21 @@ while True:
                 if signal.get("source", DATA_SOURCE) != "BINGX":
                     print(f"[WARN] Bỏ qua tín hiệu do nguồn không phải BingX: {signal.get('source')}")
                     continue
+                tradeable, tradeable_reason = is_signal_tradeable(signal)
+                if not tradeable:
+                    print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {tradeable_reason}")
+                    continue
                 sig_key = f"{signal['side']}_{signal.get('strategy', 'scalp')}_{signal.get('interval', INTERVAL)}_{signal['candle_time']}"
+                signal_bucket = f"{signal['side']}_{signal.get('strategy', 'scalp')}_{signal.get('interval', INTERVAL)}"
+                now_ts = time.time()
+                last_entry_ts = last_entry_ts_by_symbol[symbol].get(signal_bucket)
+                if last_entry_ts and (now_ts - last_entry_ts < SIGNAL_COOLDOWN_SECONDS):
+                    remaining = int(SIGNAL_COOLDOWN_SECONDS - (now_ts - last_entry_ts))
+                    print(
+                        f"[INFO] [{symbol}] Bỏ qua tín hiệu mới do cooldown {signal_bucket}: "
+                        f"còn {max(remaining, 0)}s."
+                    )
+                    continue
                 if not bootstrapped_signal_by_symbol[symbol]:
                     if not is_trading_enabled():
                         bootstrapped_signal_by_symbol[symbol] = True
@@ -1370,6 +1532,11 @@ while True:
                             active_positions_by_symbol[symbol] = [x for x in active_positions_by_symbol[symbol] if x.get("label") != pos.get("label")]
                             active_positions = active_positions_by_symbol[symbol]
                             closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
+                            update_learning_state(
+                                learning_state, symbol, pos.get("strategy", "scalp"),
+                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
+                            )
+                            mark_learning_dirty(learning_meta)
                         send_telegram(
                             "🔄 <b>Điều chỉnh danh mục lệnh</b>\n"
                             f"Mã: <b>{symbol}</b>\n"
@@ -1441,6 +1608,7 @@ while True:
                     )
                     print(f"[{symbol}] Order Result: {order}")
                     if order and order.get("code") == 0:
+                        last_entry_ts_by_symbol[symbol][signal_bucket] = time.time()
                         fill_price = extract_order_avg_price(order, last_price)
                         send_telegram(format_order_result_msg(order_signal, symbol, order, order_label, fill_price))
                         protection_result = bing_client.add_missing_tp_sl(symbol, signal["side"], order_signal.get("tp"), order_signal.get("sl"))
@@ -1466,6 +1634,8 @@ while True:
                         active_positions_by_symbol[symbol].append({
                             "label": order_label,
                             "side": signal["side"],
+                            "strategy": signal.get("strategy", "scalp"),
+                            "interval": signal.get("interval", INTERVAL),
                             "entry": fill_price,
                             "quantity": float(quantity),
                             "tp": exchange_pos.get("tp") if exchange_pos and exchange_pos.get("tp") is not None else order_signal.get("tp"),
@@ -1496,6 +1666,13 @@ while True:
                     exchange_pos = bing_client.get_open_position(symbol)
                     if not exchange_pos:
                         if active_positions:
+                            for pos in active_positions:
+                                pnl_snapshot = calc_live_pnl(pos, float(live_price))
+                                update_learning_state(
+                                    learning_state, symbol, pos.get("strategy", "scalp"),
+                                    pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
+                                )
+                            mark_learning_dirty(learning_meta)
                             closed_cycle_pnl_by_symbol[symbol] += sum(
                                 calc_live_pnl(pos, float(live_price)) for pos in active_positions
                             )
@@ -1522,6 +1699,11 @@ while True:
                             )
                             active_positions_by_symbol[symbol].remove(pos)
                             closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
+                            update_learning_state(
+                                learning_state, symbol, pos.get("strategy", "scalp"),
+                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
+                            )
+                            mark_learning_dirty(learning_meta)
                             last_pnl_bucket_by_symbol[symbol].pop(pos.get("label"), None)
                             if not active_positions_by_symbol[symbol]:
                                 send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
@@ -1536,6 +1718,11 @@ while True:
                             )
                             active_positions_by_symbol[symbol].remove(pos)
                             closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
+                            update_learning_state(
+                                learning_state, symbol, pos.get("strategy", "scalp"),
+                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
+                            )
+                            mark_learning_dirty(learning_meta)
                             last_pnl_bucket_by_symbol[symbol].pop(pos.get("label"), None)
                             if not active_positions_by_symbol[symbol]:
                                 send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
@@ -1551,6 +1738,11 @@ while True:
                             )
                             active_positions_by_symbol[symbol].remove(pos)
                             closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
+                            update_learning_state(
+                                learning_state, symbol, pos.get("strategy", "scalp"),
+                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
+                            )
+                            mark_learning_dirty(learning_meta)
                             last_pnl_bucket_by_symbol[symbol].pop(pos.get("label"), None)
                             if not active_positions_by_symbol[symbol]:
                                 send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
@@ -1565,6 +1757,11 @@ while True:
                             )
                             active_positions_by_symbol[symbol].remove(pos)
                             closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
+                            update_learning_state(
+                                learning_state, symbol, pos.get("strategy", "scalp"),
+                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
+                            )
+                            mark_learning_dirty(learning_meta)
                             last_pnl_bucket_by_symbol[symbol].pop(pos.get("label"), None)
                             if not active_positions_by_symbol[symbol]:
                                 send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
@@ -1579,7 +1776,10 @@ while True:
                         send_telegram(f"📌 <b>{symbol}</b>\n" + format_pnl_msg(pos, float(live_price)))
                         last_pnl_bucket_by_symbol[symbol][label] = pnl_bucket
 
+            maybe_flush_learning_state(learning_state, learning_meta)
+
         time.sleep(10)
     except Exception as e:
         print(f"Lỗi Main Loop: {e}")
+        maybe_flush_learning_state(learning_state, learning_meta, force=True)
         time.sleep(10)
