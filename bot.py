@@ -1399,7 +1399,8 @@ def format_pnl_msg(position, last_price):
     if qty <= 0 or entry <= 0:
         pnl = float(position.get("unrealizedProfit", 0) or 0)
     notional_base = calc_position_notional_base(position)
-    pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
+    notional_pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
+    pnl_pct = calc_live_pnl_pct(position, last_price)
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
     price_to_show = float(last_price)
     tp_text = format_price(position.get("tp")) if position.get("tp") is not None else "Chưa có"
@@ -1410,7 +1411,7 @@ def format_pnl_msg(position, last_price):
     )
     order_label = position.get("label", "LỆNH")
     return (
-        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi PnL biến động ±10% so với lần báo trước</b>\n\n"
+        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi ROI (PnL% trên ký quỹ) biến động ±10% so với lần báo trước</b>\n\n"
         f"🆔 Mã lệnh  : <b>{order_label}</b>\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
@@ -1419,7 +1420,8 @@ def format_pnl_msg(position, last_price):
         f"📊 R:R       : <b>{rr_text}</b>\n"
         f"💰 Giá hiện tại: <b>{format_price(price_to_show)}</b>\n"
         f"📦 Khối lượng : <b>{qty}</b>\n"
-        f"💵 PnL tạm tính: <b>{pnl:+.2f} USDT ({pnl_pct:+.2f}%)</b>\n"
+        f"💵 PnL tạm tính: <b>{pnl:+.2f} USDT</b>\n"
+        f"📈 ROI ký quỹ: <b>{pnl_pct:+.2f}%</b> | PnL/notional: <b>{notional_pnl_pct:+.2f}%</b>\n"
         f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
 
@@ -1442,9 +1444,16 @@ def calc_position_notional_base(position):
     return api_position_value if api_position_value > 0 else (notional_entry if notional_entry > 0 else ORDER_NOTIONAL_USDT)
 
 def calc_live_pnl_pct(position, last_price):
+    """
+    PnL% dùng cho cảnh báo theo ROI trên ký quỹ (margin), không phải % trên notional.
+    Ví dụ x100: PnL +4 USDT với notional 1000 => margin ~10 USDT => ROI ~+40%.
+    """
     pnl = calc_live_pnl(position, last_price)
     notional_base = calc_position_notional_base(position)
-    pnl_pct = (pnl / notional_base) * 100 if notional_base else 0
+    leverage = float(position.get("leverage", LEVERAGE) or LEVERAGE or 1)
+    leverage = max(leverage, 1.0)
+    margin_base = (notional_base / leverage) if notional_base else 0
+    pnl_pct = (pnl / margin_base) * 100 if margin_base else 0
     return pnl_pct
 
 def should_notify_pnl_change(prev_notified_pct, current_pct, threshold=10.0):
