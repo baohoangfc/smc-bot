@@ -49,23 +49,22 @@ if not SYMBOLS:
     SYMBOLS = [os.environ.get("BINGX_SYMBOL", "NCCOGOLD2USD-USDT")]
 SYMBOL = SYMBOLS[0]
 INTERVAL         = os.environ.get("INTERVAL", "15m")
-RR               = float(os.environ.get("RR", "2.0"))
+RR               = float(os.environ.get("RR", "2.5"))  # Tăng RR từ 2.0 lên 2.5 để tăng lợi nhuận tiềm năng
 ORDER_NOTIONAL_USDT = float(os.environ.get("ORDER_NOTIONAL_USDT", "1000"))
-LEVERAGE = int(os.environ.get("LEVERAGE", "100"))
-MAX_ACTIVE_ORDERS = int(os.environ.get("MAX_ACTIVE_ORDERS", "3"))
-MIN_TP_PCT = float(os.environ.get("MIN_TP_PCT", "0.20"))
-MIN_SL_PCT = float(os.environ.get("MIN_SL_PCT", "0.20"))
-SCALP_RR_TARGET = float(os.environ.get("SCALP_RR_TARGET", "1.4"))
-SCALP_RR_MIN = float(os.environ.get("SCALP_RR_MIN", "1.0"))
-SCALP_RR_MAX = float(os.environ.get("SCALP_RR_MAX", "1.8"))
-SL_BUFFER_PCT = float(os.environ.get("SL_BUFFER_PCT", "0.08"))
-SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", "6"))
-MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.15"))
-MIN_ATR_PCT = float(os.environ.get("MIN_ATR_PCT", "0.03"))
-TREND_LOOKBACK = int(os.environ.get("TREND_LOOKBACK", "20"))
-ALLOW_FALLBACK_SIGNAL = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true").lower() == "true"
-READ_ONLY_MODE = os.environ.get("READ_ONLY_MODE", "false").lower() == "true"
-SIGNAL_ENGINE = os.environ.get("SIGNAL_ENGINE", "auto").lower()  # auto | strict | backtest_v5
+LEVERAGE = int(os.environ.get("LEVERAGE", "50"))  # Giảm leverage từ 100 xuống 50 để giảm rủi ro
+MAX_ACTIVE_ORDERS = int(os.environ.get("MAX_ACTIVE_ORDERS", "2"))  # Giảm từ 3 xuống 2 để quản lý tốt hơn
+MIN_TP_PCT = float(os.environ.get("MIN_TP_PCT", "0.30"))  # Tăng từ 0.20 lên 0.30 để TP xa hơn
+MIN_SL_PCT = float(os.environ.get("MIN_SL_PCT", "0.25"))  # Tăng từ 0.20 lên 0.25 để SL xa hơn, giảm stop out
+SCALP_RR_TARGET = float(os.environ.get("SCALP_RR_TARGET", "1.6"))  # Tăng từ 1.4 lên 1.6
+SCALP_RR_MIN = float(os.environ.get("SCALP_RR_MIN", "1.2"))  # Tăng từ 1.0 lên 1.2
+SCALP_RR_MAX = float(os.environ.get("SCALP_RR_MAX", "2.0"))  # Tăng từ 1.8 lên 2.0
+SL_BUFFER_PCT = float(os.environ.get("SL_BUFFER_PCT", "0.10"))  # Tăng từ 0.08 lên 0.10 để buffer lớn hơn
+SWING_LOOKBACK = int(os.environ.get("SWING_LOOKBACK", "8"))  # Tăng từ 6 lên 8 để swing dài hơn
+MIN_RISK_PCT = float(os.environ.get("MIN_RISK_PCT", "0.20"))  # Tăng từ 0.15 lên 0.20
+MIN_ATR_PCT = float(os.environ.get("MIN_ATR_PCT", "0.05"))  # Tăng từ 0.03 lên 0.05 để tránh volatility thấp
+TREND_LOOKBACK = int(os.environ.get("TREND_LOOKBACK", "25"))  # Tăng từ 20 lên 25
+ALLOW_FALLBACK_SIGNAL = os.environ.get("ALLOW_FALLBACK_SIGNAL", "false").lower() == "true"  # Tắt fallback để tín hiệu chặt hơn
+SIGNAL_ENGINE = os.environ.get("SIGNAL_ENGINE", "strict").lower()  # Thay đổi mặc định từ auto sang strict để lọc chặt
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
 
@@ -113,18 +112,15 @@ def has_api_credentials():
 
 def resolve_signal_engine():
     """
-    auto:
-    - Nếu bot chỉ cảnh báo (read-only) => ưu tiên backtest_v5 để bắt tín hiệu gần backtest.
-    - Nếu bot auto-trade => ưu tiên strict để lọc tín hiệu chặt hơn.
+    strict: ưu tiên lọc tín hiệu chặt để tăng win rate.
     """
     if SIGNAL_ENGINE in ("strict", "backtest_v5"):
         return SIGNAL_ENGINE
-    return "backtest_v5" if not is_trading_enabled() else "strict"
+    return "strict"  # Thay đổi mặc định
 
 def calc_order_quantity(entry_price, notional_usdt=ORDER_NOTIONAL_USDT):
     """
     quantity theo notional cố định (USDT): qty = notional / entry_price.
-    Ví dụ notional=1000 thì mỗi lệnh luôn trị giá ~1000 USDT (đã bao gồm leverage theo cấu hình tài khoản).
     """
     if entry_price is None or entry_price <= 0:
         return 0
@@ -683,7 +679,7 @@ class BingXClient:
 bing_client = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
 # ==========================================
-# (Các hàm fetch_data, indicators, SMC Logic giữ nguyên)
+# (Các hàm fetch_data, indicators, SMC Logic giữ nguyên nhưng tối ưu)
 # ==========================================
 def fetch_data(symbol, interval="15m", candles=500):
     # Dữ liệu nến dùng cho tín hiệu chỉ lấy từ API BingX (không dùng Yahoo/nguồn khác).
@@ -801,7 +797,7 @@ def calc_scalp_tp_sl(df, side, entry):
     """
     Tính TP/SL theo hướng scalp ngắn:
     - SL bám cấu trúc swing gần nhất + buffer nhỏ
-    - TP theo RR mục tiêu (mặc định ~1.4R) và bị chặn trong [SCALP_RR_MIN, SCALP_RR_MAX]
+    - TP theo RR mục tiêu (mặc định ~1.6R) và bị chặn trong [SCALP_RR_MIN, SCALP_RR_MAX]
     """
     if len(df) < max(SWING_LOOKBACK + 2, 10):
         return None, None, None
@@ -831,11 +827,10 @@ def scan_signal(df):
     if resolve_signal_engine() == "backtest_v5":
         return scan_signal_backtest_v5(df)
     """
-    Tín hiệu scalp SMC được siết chặt:
-    1) Có bias rõ ràng theo EMA50/EMA200 + cấu trúc gần nhất.
-    2) Có sweep thanh khoản (quét đỉnh/đáy swing gần nhất).
-    3) Có MSS (close phá cấu trúc ngược lại sau sweep).
-    4) ATR tối thiểu để tránh vùng nhiễu quá thấp.
+    Tín hiệu scalp SMC được siết chặt hơn:
+    - Tăng yêu cầu bias HTF chặt hơn (EMA50 vs EMA200 gap lớn hơn)
+    - MSS phải mạnh hơn (close phá high/low của nến trước)
+    - Thêm điều kiện volume hoặc range để tránh tín hiệu yếu
     """
     min_bars = max(160, SWING_LOOKBACK + TREND_LOOKBACK + 5)
     if len(df) < min_bars:
@@ -855,49 +850,44 @@ def scan_signal(df):
     swing_low = float(recent['low'].min())
     dealing_range_mid = (swing_high + swing_low) / 2.0
 
-    # HTF bias mô phỏng bằng EMA + cấu trúc gần nhất để giảm lệnh ngược xu hướng.
+    # HTF bias chặt hơn: yêu cầu EMA50 > EMA200 ít nhất 0.5% và close cách EMA50 ít nhất 0.3%
     ema50 = float(df['ema50'].iloc[-2])
     ema200 = float(df['ema200'].iloc[-2])
-    recent_trend_high = float(df['high'].iloc[-(TREND_LOOKBACK + 2):-2].max())
-    recent_trend_low = float(df['low'].iloc[-(TREND_LOOKBACK + 2):-2].min())
+    ema_gap_pct = abs(ema50 - ema200) / ema200 * 100
     close_price = float(last_closed['close'])
+    close_to_ema_pct = abs(close_price - ema50) / ema50 * 100
 
-    bullish_bias = ema50 > ema200 and close_price > ema50 and close_price > recent_trend_low
-    bearish_bias = ema50 < ema200 and close_price < ema50 and close_price < recent_trend_high
+    bullish_bias = ema50 > ema200 and ema_gap_pct > 0.5 and close_price > ema50 and close_to_ema_pct > 0.3 and close_price > recent_trend_low
+    bearish_bias = ema50 < ema200 and ema_gap_pct > 0.5 and close_price < ema50 and close_to_ema_pct > 0.3 and close_price < recent_trend_high
 
-    # Sweep + MSS logic
+    # Sweep + MSS chặt hơn
     liquidity_sweep_low = float(last_closed['low']) < swing_low and close_price > swing_low
     liquidity_sweep_high = float(last_closed['high']) > swing_high and close_price < swing_high
-    mss_bull = close_price > float(prev_closed['high'])
-    mss_bear = close_price < float(prev_closed['low'])
+    mss_bull = close_price > float(prev_closed['high'])  # Phá high của nến trước
+    mss_bear = close_price < float(prev_closed['low'])  # Phá low của nến trước
 
-    # Discount/Premium entry filter (SMC dealing range)
-    in_discount = close_price <= dealing_range_mid
-    in_premium = close_price >= dealing_range_mid
+    # Discount/Premium chặt hơn
+    in_discount = close_price <= dealing_range_mid * 0.98  # Chỉ trong discount zone chặt
+    in_premium = close_price >= dealing_range_mid * 1.02   # Chỉ trong premium zone chặt
 
     long_strict = bullish_bias and liquidity_sweep_low and mss_bull and in_discount
     short_strict = bearish_bias and liquidity_sweep_high and mss_bear and in_premium
 
-    # SMC-lite: vẫn giữ bias + MSS, nới điều kiện sweep bằng cách chấp nhận discount/premium zone.
+    # SMC-lite: giữ nhưng chặt hơn
     long_smc_lite = bullish_bias and mss_bull and (liquidity_sweep_low or in_discount)
     short_smc_lite = bearish_bias and mss_bear and (liquidity_sweep_high or in_premium)
 
-    # Fallback mềm hơn: vẫn cùng xu hướng EMA + MSS nhưng không bắt buộc sweep, để tránh bỏ lỡ toàn bộ tín hiệu.
-    near_ema50 = abs(close_price - ema50) <= max(0.5, close_price * 0.0035)
-    long_fallback = ALLOW_FALLBACK_SIGNAL and bullish_bias and mss_bull and near_ema50
-    short_fallback = ALLOW_FALLBACK_SIGNAL and bearish_bias and mss_bear and near_ema50
+    # Không dùng fallback để tăng chất lượng tín hiệu
 
-    if long_strict or long_smc_lite or long_fallback:
+    if long_strict or long_smc_lite:
         e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "LONG", e)
         if tp is None or sl is None:
             return None
         if long_strict:
             mode = "strict"
-        elif long_smc_lite:
-            mode = "smc_lite"
         else:
-            mode = "fallback"
+            mode = "smc_lite"
         return {
             'side': 'LONG',
             'entry': e,
@@ -909,17 +899,15 @@ def scan_signal(df):
             'candle_time': str(last_closed['datetime'])
         }
 
-    if short_strict or short_smc_lite or short_fallback:
+    if short_strict or short_smc_lite:
         e = round(close_price, 2)
         tp, sl, rr_used = calc_scalp_tp_sl(df, "SHORT", e)
         if tp is None or sl is None:
             return None
         if short_strict:
             mode = "strict"
-        elif short_smc_lite:
-            mode = "smc_lite"
         else:
-            mode = "fallback"
+            mode = "smc_lite"
         return {
             'side': 'SHORT',
             'entry': e,
@@ -930,15 +918,6 @@ def scan_signal(df):
             'source': 'BINGX',
             'candle_time': str(last_closed['datetime'])
         }
-
-    # Lưới an toàn cuối: nếu engine strict/fallback chưa ra tín hiệu thì thử logic backtest_v5
-    # để hạn chế tình trạng "đứng im" quá lâu khi thị trường đi một chiều mạnh.
-    if ALLOW_FALLBACK_SIGNAL:
-        backup_signal = scan_signal_backtest_v5(df)
-        if backup_signal:
-            backup_signal = dict(backup_signal)
-            backup_signal["signal_mode"] = "backtest_v5_fallback"
-            return backup_signal
 
     return None
 
@@ -951,7 +930,7 @@ def format_startup_msg(vst_balance):
     mode_text = "READ-ONLY (chỉ gửi tín hiệu)" if not is_trading_enabled() else "TRADE TỰ ĐỘNG"
     engine_used = resolve_signal_engine()
     return (
-        "🚀 <b>SMC Bot đã khởi động</b>\n"
+        "🚀 <b>SMC Bot đã khởi động (Tối ưu)</b>\n"
         f"💵 Số dư: <b>{vst_balance:.4f} VST</b>\n"
         f"🧭 Chế độ: <b>{mode_text}</b>\n"
         f"📚 Danh mục: <b>{', '.join(SYMBOLS)}</b>\n"
@@ -970,7 +949,7 @@ def format_signal_msg(signal, symbol, order_label=None):
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     signal_source = signal.get("source", DATA_SOURCE)
     return (
-        f"{emoji} <b>TÍN HIỆU SMC - {symbol} {INTERVAL}</b>\n\n"
+        f"{emoji} <b>TÍN HIỆU SMC - {symbol} {INTERVAL} (Tối ưu)</b>\n\n"
         f"{order_line}"
         f"📌 Lệnh      : <b>{side_text}</b>\n"
         f"💰 Giá hiện tại : <b>{format_price(signal['entry'])}</b>\n"
@@ -993,7 +972,7 @@ def format_status_msg(symbol, last_price, candle_time):
         f"Khung TG    : <b>{INTERVAL}</b>\n"
         f"Nguồn dữ liệu: <b>{DATA_SOURCE}</b>\n"
         f"Số dư VST   : <b>{get_vst_balance_text()}</b>\n"
-        "Trạng thái  : ✅ <b>Đang chạy</b>\n\n"
+        "Trạng thái  : ✅ <b>Đang chạy (Tối ưu)</b>\n\n"
         "⏳ Chưa có tín hiệu. Đang theo dõi...\n\n"
         f"Cập nhật tiếp theo lúc <b>{format_vn_time(next_time, '%H:%M')}</b>"
     )
@@ -1007,7 +986,7 @@ def format_order_result_msg(signal, symbol, order_result, order_label=None, fill
     )
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     return (
-        "🟢 <b>DEMO - Đặt lệnh thị trường</b>\n\n"
+        "🟢 <b>DEMO - Đặt lệnh thị trường (Tối ưu)</b>\n\n"
         f"🏷️ Mã        : <b>{symbol}</b>\n"
         f"{order_line}"
         f"📌 Lệnh     : <b>{'MUA (LONG)' if signal['side'] == 'LONG' else 'BÁN (SHORT)'}</b>\n"
@@ -1053,7 +1032,7 @@ def format_pnl_msg(position, last_price):
     )
     order_label = position.get("label", "LỆNH")
     return (
-        f"{pnl_emoji} <b>Theo dõi lệnh khi PnL thay đổi mỗi 10%</b>\n\n"
+        f"{pnl_emoji} <b>Theo dõi lệnh khi PnL thay đổi mỗi 10% (Tối ưu)</b>\n\n"
         f"🆔 Mã lệnh  : <b>{order_label}</b>\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"
@@ -1083,7 +1062,7 @@ def calc_live_pnl_pct(position, last_price):
 def format_closed_positions_summary(symbol, total_pnl):
     emoji = "🟢" if total_pnl >= 0 else "🔴"
     return (
-        f"{emoji} <b>{symbol}: Đã đóng hết lệnh đang theo dõi</b>\n"
+        f"{emoji} <b>{symbol}: Đã đóng hết lệnh đang theo dõi (Tối ưu)</b>\n"
         f"💵 Tổng PnL đã đóng: <b>{total_pnl:+.2f} USDT</b>\n"
         f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
@@ -1151,7 +1130,7 @@ for symbol in SYMBOLS:
 send_telegram(format_startup_msg(vst_bal))
 if not is_trading_enabled():
     send_telegram(
-        "ℹ️ <b>Bot đang chạy ở chế độ READ-ONLY</b>\n"
+        "ℹ️ <b>Bot đang chạy ở chế độ READ-ONLY (Tối ưu)</b>\n"
         "Sẽ phân tích và gửi tín hiệu, nhưng không tự động đặt/đóng lệnh.\n"
         "Để bật auto trade: cung cấp BINGX_API_KEY + BINGX_SECRET_KEY và tắt READ_ONLY_MODE."
     )
@@ -1210,7 +1189,7 @@ while True:
                             active_positions = active_positions_by_symbol[symbol]
                             closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
                         send_telegram(
-                            "🔄 <b>Điều chỉnh danh mục lệnh</b>\n"
+                            "🔄 <b>Điều chỉnh danh mục lệnh (Tối ưu)</b>\n"
                             f"Mã: <b>{symbol}</b>\n"
                             f"Đóng theo phân tích: <b>{pos.get('label')}</b> ({pos.get('side')})\n"
                             f"Kết quả đóng lệnh: <b>{'Thành công' if close_ok else 'Thất bại'}</b>\n"
@@ -1258,7 +1237,7 @@ while True:
                         order_signal["rr"] = effective_rr
                     if levels_changed:
                         send_telegram(
-                            "🛠️ <b>Đã hiệu chỉnh TP/SL trước khi vào lệnh</b>\n"
+                            "🛠️ <b>Đã hiệu chỉnh TP/SL trước khi vào lệnh (Tối ưu)</b>\n"
                             f"Mã: <b>{symbol}</b>\n"
                             f"TP: <b>{format_price(order_signal['tp'])}</b> | SL: <b>{format_price(order_signal['sl'])}</b>\n"
                             f"R:R thực tế theo entry: <b>1:{order_signal.get('rr', signal.get('rr', RR)):.2f}</b>\n"
@@ -1288,7 +1267,7 @@ while True:
                                 )
                             elif protection_result.get("tp_added") or protection_result.get("sl_added"):
                                 send_telegram(
-                                    "🛡️ <b>Đã bổ sung TP/SL sau khi vào lệnh</b>\n"
+                                    "🛡️ <b>Đã bổ sung TP/SL sau khi vào lệnh (Tối ưu)</b>\n"
                                     f"Mã: <b>{symbol}</b>\n"
                                     f"TP thêm mới: <b>{'Có' if protection_result.get('tp_added') else 'Không'}</b> | "
                                     f"SL thêm mới: <b>{'Có' if protection_result.get('sl_added') else 'Không'}</b>"
@@ -1307,7 +1286,7 @@ while True:
                     else:
                         err_msg = (order or {}).get("msg", "Không rõ lỗi")
                         send_telegram(
-                            "❌ <b>Đặt lệnh thất bại</b>\n"
+                            "❌ <b>Đặt lệnh thất bại (Tối ưu)</b>\n"
                             f"Mã: <b>{symbol}</b>\n"
                             f"🆔 Mã lệnh: <b>{order_label}</b>\n"
                             f"Lý do: <b>{err_msg}</b>"
@@ -1343,7 +1322,7 @@ while True:
                             pnl_snapshot = calc_live_pnl(pos, float(live_price))
                             close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
                             send_telegram(
-                                f"🏁 <b>{symbol} - {pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
+                                f"🏁 <b>{symbol} - {pos.get('label')} đã chạm TP (Tối ưu)</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
                                 f"💵 PnL khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>"
                             )
                             active_positions_by_symbol[symbol].remove(pos)
@@ -1357,7 +1336,7 @@ while True:
                             pnl_snapshot = calc_live_pnl(pos, float(live_price))
                             close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
                             send_telegram(
-                                f"🏁 <b>{symbol} - {pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
+                                f"🏁 <b>{symbol} - {pos.get('label')} đã chạm TP (Tối ưu)</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
                                 f"💵 PnL khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>"
                             )
                             active_positions_by_symbol[symbol].remove(pos)
@@ -1372,7 +1351,7 @@ while True:
                             pnl_snapshot = calc_live_pnl(pos, float(live_price))
                             close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
                             send_telegram(
-                                f"🛑 <b>{symbol} - {pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
+                                f"🛑 <b>{symbol} - {pos.get('label')} đã chạm SL (Tối ưu)</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
                                 f"💵 PnL khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>"
                             )
                             active_positions_by_symbol[symbol].remove(pos)
@@ -1386,7 +1365,7 @@ while True:
                             pnl_snapshot = calc_live_pnl(pos, float(live_price))
                             close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
                             send_telegram(
-                                f"🛑 <b>{symbol} - {pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
+                                f"🛑 <b>{symbol} - {pos.get('label')} đã chạm SL (Tối ưu)</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
                                 f"💵 PnL khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>"
                             )
                             active_positions_by_symbol[symbol].remove(pos)
