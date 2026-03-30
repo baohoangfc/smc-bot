@@ -1064,6 +1064,18 @@ def format_startup_msg(vst_balance):
         f"🕒 Thời gian: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
 
+def build_entry_reason(signal):
+    strategy = signal.get("strategy", "scalp")
+    tf = signal.get("interval", INTERVAL)
+    mode = signal.get("signal_mode", "strict")
+    quality_score = signal.get("quality_score")
+    quality_text = f"{float(quality_score):.2f}" if quality_score is not None else "N/A"
+    rr_text = format_rr_text(
+        signal["side"], signal.get("entry"), signal.get("tp"), signal.get("sl"),
+        fallback_rr=signal.get("rr", SCALP_RR_TARGET), decimals=2
+    )
+    return f"{strategy.upper()} {tf} | mode={mode} | quality={quality_text} | RR={rr_text}"
+
 def format_signal_msg(signal, symbol, order_label=None):
     emoji = "🟢" if signal["side"] == "LONG" else "🔴"
     side_text = "MUA (LONG)" if signal["side"] == "LONG" else "BÁN (SHORT)"
@@ -1078,6 +1090,7 @@ def format_signal_msg(signal, symbol, order_label=None):
     strategy = signal.get("strategy", "scalp")
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
     signal_source = signal.get("source", DATA_SOURCE)
+    entry_reason = build_entry_reason(signal)
     return (
         f"{emoji} <b>TÍN HIỆU SMC - {symbol} {tf}</b>\n\n"
         f"{order_line}"
@@ -1090,14 +1103,16 @@ def format_signal_msg(signal, symbol, order_label=None):
         f"📊 R:R       : <b>{rr_text}</b>\n"
         f"⭐ Quality   : <b>{quality_text}</b>\n"
         f"🧠 Mode      : <b>{signal_mode}</b>\n\n"
+        f"📝 Lý do vào lệnh: <b>{entry_reason}</b>\n"
         f"💵 Số dư VST : <b>{get_vst_balance_text()}</b>\n"
         f"🔌 Nguồn dữ liệu: <b>{signal_source}</b>\n"
         f"⏰ <b>{format_vn_time(signal['candle_time'])} (GMT+7)</b>\n"
         "⚠️ <i>Chỉ tham khảo, tự xác nhận trước khi vào lệnh</i>"
     )
 
-def format_status_msg(symbol, last_price, candle_time):
+def format_status_msg(symbol, last_price, candle_time, wait_reason=None):
     next_time = now_vn() + timedelta(hours=1)
+    reason_text = wait_reason or "Chưa có setup đạt điều kiện vào lệnh ở các khung đang theo dõi."
     return (
         f"🤖 <b>SMC Bot - Cập nhật {format_vn_time(candle_time, '%H:%M')} (GMT+7)</b>\n\n"
         f"Giá {symbol} : <b>{format_price(last_price)}</b>\n"
@@ -1106,6 +1121,7 @@ def format_status_msg(symbol, last_price, candle_time):
         f"Số dư VST   : <b>{get_vst_balance_text()}</b>\n"
         "Trạng thái  : ✅ <b>Đang chạy</b>\n\n"
         "⏳ Chưa có tín hiệu. Đang theo dõi...\n\n"
+        f"📝 Lý do chờ: <b>{reason_text}</b>\n\n"
         f"Cập nhật tiếp theo lúc <b>{format_vn_time(next_time, '%H:%M')}</b>"
     )
 
@@ -1330,7 +1346,10 @@ while True:
                     else:
                         last_signal_key_by_symbol[symbol] = sig_key
                         bootstrapped_signal_by_symbol[symbol] = True
-                        print(f"[INFO] [{symbol}] Bootstrapped signal: {sig_key} - chờ tín hiệu mới để vào lệnh.")
+                        print(
+                            f"[INFO] [{symbol}] Bootstrapped signal: {sig_key} - chờ tín hiệu mới để vào lệnh. "
+                            f"Lý do chờ: cần nến/tín hiệu mới sau khi bot khởi động lại để tránh vào trùng lệnh cũ."
+                        )
                         continue
 
                 if sig_key != last_signal_key_by_symbol[symbol]:
@@ -1365,7 +1384,11 @@ while True:
                         closed_cycle_pnl_by_symbol[symbol] = 0.0
 
                     if len(active_positions) >= MAX_ACTIVE_ORDERS:
-                        print(f"[INFO] [{symbol}] Đã đạt tối đa số lệnh giữ, bỏ qua tín hiệu mới.")
+                        print(
+                            f"[INFO] [{symbol}] Đã đạt tối đa số lệnh giữ, bỏ qua tín hiệu mới. "
+                            f"Lý do chờ: đang giữ {len(active_positions)}/{MAX_ACTIVE_ORDERS} lệnh, "
+                            f"ưu tiên quản trị rủi ro trước khi mở thêm."
+                        )
                         last_signal_key_by_symbol[symbol] = sig_key
                         continue
 
@@ -1374,6 +1397,10 @@ while True:
                     send_telegram(format_signal_msg(signal, symbol, order_label))
                     last_signal_key_by_symbol[symbol] = sig_key
                     last_price = float(live_price)
+                    print(
+                        f"[INFO] [{symbol}] Chuẩn bị vào {order_label} | Side={signal['side']} | "
+                        f"Lý do vào lệnh: {build_entry_reason(signal)}"
+                    )
                     order_signal = dict(signal)
                     order_signal["tp"], order_signal["sl"], levels_changed = normalize_tp_sl_by_entry(
                         order_signal["side"], last_price, order_signal.get("tp"), order_signal.get("sl")
@@ -1456,7 +1483,12 @@ while True:
                         )
 
             elif (not active_positions) and (time.time() - last_status_notify_ts_by_symbol[symbol] >= 3600):
-                send_telegram(format_status_msg(symbol, live_price, candle_time))
+                wait_reason = (
+                    f"Chưa có tín hiệu mới phù hợp ở các TF đang theo dõi "
+                    f"({', '.join(SIGNAL_INTERVALS)}), bot tiếp tục quan sát để chờ điểm vào có RR/quality tốt."
+                )
+                print(f"[INFO] [{symbol}] Chưa vào lệnh. Lý do chờ: {wait_reason}")
+                send_telegram(format_status_msg(symbol, live_price, candle_time, wait_reason))
                 last_status_notify_ts_by_symbol[symbol] = time.time()
 
             if active_positions:
