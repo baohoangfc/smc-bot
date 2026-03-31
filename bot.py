@@ -98,6 +98,15 @@ FALLBACK_REQUIRE_HIGH_LIQUIDITY = os.environ.get("FALLBACK_REQUIRE_HIGH_LIQUIDIT
 BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
 BE_OFFSET_PCT = float(os.environ.get("BE_OFFSET_PCT", "0.02"))
 TELEGRAM_DEDUP_WINDOW_SECONDS = float(os.environ.get("TELEGRAM_DEDUP_WINDOW_SECONDS", "20"))
+GRID_BOT_ENABLED = os.environ.get("GRID_BOT_ENABLED", "true").lower() == "true"
+GRID_INTERVAL = os.environ.get("GRID_INTERVAL", "1m").lower()
+GRID_ANCHOR_WINDOW = int(os.environ.get("GRID_ANCHOR_WINDOW", "34"))
+GRID_LEVELS = int(os.environ.get("GRID_LEVELS", "5"))
+GRID_STEP_PCT = float(os.environ.get("GRID_STEP_PCT", "0.18"))
+GRID_TP_FACTOR = float(os.environ.get("GRID_TP_FACTOR", "0.90"))
+GRID_SL_FACTOR = float(os.environ.get("GRID_SL_FACTOR", "1.50"))
+GRID_MIN_QUALITY_SCORE = float(os.environ.get("GRID_MIN_QUALITY_SCORE", "2.10"))
+GRID_MIN_ATR_PCT = float(os.environ.get("GRID_MIN_ATR_PCT", "0.03"))
 
 def parse_intervals(raw_value, fallback):
     intervals = [s.strip().lower() for s in (raw_value or "").split(",") if s.strip()]
@@ -150,6 +159,8 @@ def sanitize_intervals(intervals, fallback):
 SCALP_INTERVALS = sanitize_intervals(parse_intervals(SCALP_INTERVALS_RAW, [INTERVAL]), [INTERVAL])
 SWING_INTERVALS = sanitize_intervals(parse_intervals(SWING_INTERVALS_RAW, ["4h"]), ["4h"])
 SIGNAL_INTERVALS = list(dict.fromkeys(SCALP_INTERVALS + SWING_INTERVALS))
+if GRID_BOT_ENABLED and GRID_INTERVAL in VALID_INTERVALS and GRID_INTERVAL not in SIGNAL_INTERVALS:
+    SIGNAL_INTERVALS.append(GRID_INTERVAL)
 LIQUIDITY_WINDOWS_VN = parse_hour_windows(LIQUIDITY_WINDOWS_VN_RAW)
 
 def now_vn(): return datetime.utcnow() + timedelta(hours=7)
@@ -1428,6 +1439,65 @@ def scan_swing_signal(df):
     signal["quality_score"] = round(float(signal.get("quality_score", 2.1)), 2)
     return signal
 
+def scan_grid_signal(df):
+    """
+    Grid fast scalp: vào lệnh ngược chiều khi giá lệch khỏi anchor ngắn hạn theo từng "nấc lưới".
+    Mục tiêu là ăn nhịp hồi nhanh với TP ngắn và SL cố định theo bội số của bước lưới.
+    """
+    if not GRID_BOT_ENABLED or df is None or len(df) < max(20, GRID_ANCHOR_WINDOW + 2):
+        return None
+
+    latest = df.iloc[-2]
+    entry = float(latest["close"])
+    if entry <= 0:
+        return None
+
+    anchor_series = df["close"].rolling(window=max(5, GRID_ANCHOR_WINDOW)).mean()
+    anchor = float(anchor_series.iloc[-2]) if not pd.isna(anchor_series.iloc[-2]) else 0.0
+    if anchor <= 0:
+        return None
+
+    atr_value = float(latest.get("atr", 0) or 0)
+    atr_pct = (atr_value / entry * 100) if atr_value > 0 else 0
+    if atr_pct < GRID_MIN_ATR_PCT:
+        return None
+
+    deviation_pct = ((entry - anchor) / anchor) * 100.0
+    level_size = max(0.02, GRID_STEP_PCT)
+    level_idx = min(max(0, int(abs(deviation_pct) / level_size)), max(1, GRID_LEVELS))
+    if level_idx < 1:
+        return None
+
+    side = "SHORT" if deviation_pct > 0 else "LONG"
+    tp_distance_pct = max(MIN_TP_PCT, level_size * level_idx * max(0.5, GRID_TP_FACTOR))
+    sl_distance_pct = max(MIN_SL_PCT, level_size * level_idx * max(1.0, GRID_SL_FACTOR))
+    if side == "LONG":
+        tp = round(entry * (1 + tp_distance_pct / 100.0), 2)
+        sl = round(entry * (1 - sl_distance_pct / 100.0), 2)
+    else:
+        tp = round(entry * (1 - tp_distance_pct / 100.0), 2)
+        sl = round(entry * (1 + sl_distance_pct / 100.0), 2)
+
+    rr_now = calc_rr_from_levels(side, entry, tp, sl) or 0
+    quality = 1.8 + min(1.2, level_idx * 0.22) + min(0.5, atr_pct * 0.15)
+    if quality < GRID_MIN_QUALITY_SCORE:
+        return None
+
+    return {
+        "side": side,
+        "entry": round(entry, 2),
+        "sl": sl,
+        "tp": tp,
+        "rr": round(rr_now, 2),
+        "quality_score": round(quality, 2),
+        "signal_mode": "grid_fast",
+        "strategy": "grid",
+        "source": "BINGX",
+        "grid_level": level_idx,
+        "grid_anchor": round(anchor, 2),
+        "candle_time": str(latest["datetime"]),
+    }
+
 def signal_priority_score(signal, dt_value=None):
     quality = float(signal.get("quality_score", 0) or 0)
     rr_value = float(signal.get("rr", 0) or 0)
@@ -1471,6 +1541,7 @@ def format_startup_msg(vst_balance):
         f"📚 Danh mục: <b>{', '.join(SYMBOLS)}</b>\n"
         f"⏱️ Scalp TF: <b>{', '.join(SCALP_INTERVALS)}</b>\n"
         f"📈 Swing TF: <b>{', '.join(SWING_INTERVALS)}</b>\n"
+        f"🧱 Grid fast: <b>{'ON' if GRID_BOT_ENABLED else 'OFF'}</b> ({GRID_INTERVAL}, step={GRID_STEP_PCT:.2f}%)\n"
         f"🧠 Signal engine: <b>{engine_used}</b> (config={SIGNAL_ENGINE})\n"
         f"🕒 Thời gian: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
@@ -1911,6 +1982,16 @@ while True:
                     swing_signal["interval"] = tf
                     swing_signal = apply_learning_to_signal_v2(learning_state, symbol, swing_signal)
                     candidates.append(swing_signal)
+
+            if GRID_BOT_ENABLED:
+                grid_df = symbol_frames.get(GRID_INTERVAL)
+                if grid_df is not None and len(grid_df) >= 3:
+                    grid_signal = scan_grid_signal(grid_df)
+                    if grid_signal:
+                        grid_signal = dict(grid_signal)
+                        grid_signal["interval"] = GRID_INTERVAL
+                        grid_signal = apply_learning_to_signal_v2(learning_state, symbol, grid_signal)
+                        candidates.append(grid_signal)
 
             signal_eval_time = now_vn()
             signal = pick_best_signal(candidates, signal_eval_time)
