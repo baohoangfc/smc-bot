@@ -97,6 +97,7 @@ FALLBACK_MIN_QUALITY_SCORE = float(os.environ.get("FALLBACK_MIN_QUALITY_SCORE", 
 FALLBACK_REQUIRE_HIGH_LIQUIDITY = os.environ.get("FALLBACK_REQUIRE_HIGH_LIQUIDITY", "true").lower() == "true"
 BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
 BE_OFFSET_PCT = float(os.environ.get("BE_OFFSET_PCT", "0.02"))
+TELEGRAM_DEDUP_WINDOW_SECONDS = float(os.environ.get("TELEGRAM_DEDUP_WINDOW_SECONDS", "20"))
 
 def parse_intervals(raw_value, fallback):
     intervals = [s.strip().lower() for s in (raw_value or "").split(",") if s.strip()]
@@ -139,6 +140,8 @@ def build_http_session():
     return session
 
 HTTP_SESSION = build_http_session()
+_telegram_recent_messages = {}
+_telegram_dedup_lock = threading.Lock()
 
 def sanitize_intervals(intervals, fallback):
     valid = [i for i in intervals if i in VALID_INTERVALS]
@@ -175,31 +178,74 @@ def parse_trigger_price(raw_value):
     """
     if raw_value is None:
         return None
-    parsed_value = raw_value
-    if isinstance(parsed_value, str):
-        stripped = parsed_value.strip()
-        if not stripped:
-            return None
-        try:
-            # Trường hợp chuỗi số đơn giản: "67385.5"
-            direct = float(stripped)
-            if direct > 0:
-                return direct
-        except Exception:
-            pass
-        if stripped.startswith("{") and stripped.endswith("}"):
-            try:
-                parsed_value = json.loads(stripped)
-            except Exception:
+    def _decode_json_layers(value, max_depth=3):
+        current = value
+        for _ in range(max_depth):
+            if not isinstance(current, str):
+                break
+            stripped = current.strip()
+            if not stripped:
                 return None
+            try:
+                direct = float(stripped)
+                if direct > 0:
+                    return direct
+            except Exception:
+                pass
+
+            # Hỗ trợ cả chuỗi JSON bị quote thêm 1 lớp:
+            # "\"{\\\"stopPrice\\\":\\\"67400\\\"}\""
+            if stripped[0] in {"{", "[", "\""}:
+                try:
+                    current = json.loads(stripped)
+                    continue
+                except Exception:
+                    return None
+            break
+        return current
+
+    parsed_value = _decode_json_layers(raw_value)
+
+    if isinstance(parsed_value, list):
+        for item in parsed_value:
+            found = parse_trigger_price(item)
+            if found is not None:
+                return found
+        return None
 
     if isinstance(parsed_value, dict):
-        return pick_first_float(
+        direct = pick_first_float(
             parsed_value.get("stopPrice"),
             parsed_value.get("price"),
             parsed_value.get("triggerPrice"),
-            parsed_value.get("avgPrice")
+            parsed_value.get("avgPrice"),
+            parsed_value.get("activatePrice"),
+            parsed_value.get("triggerPx"),
+            parsed_value.get("stopPx"),
+            parsed_value.get("trigger"),
+            parsed_value.get("value")
         )
+        if direct is not None:
+            return direct
+
+        # Ưu tiên bóc các nhánh hay gặp trong payload BingX.
+        nested_priority_keys = [
+            "data", "order", "params", "detail", "extra",
+            "takeProfit", "stopLoss", "tpOrder", "slOrder", "trigger"
+        ]
+        for key in nested_priority_keys:
+            if key not in parsed_value:
+                continue
+            found = parse_trigger_price(parsed_value.get(key))
+            if found is not None:
+                return found
+
+        # Fallback: quét toàn bộ dict nếu BingX đổi schema.
+        for value in parsed_value.values():
+            found = parse_trigger_price(value)
+            if found is not None:
+                return found
+        return None
 
     return pick_first_float(parsed_value)
 
@@ -355,10 +401,48 @@ def interval_to_minutes(interval):
     mapping = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
     return mapping.get(interval, 15)
 
+def build_telegram_dedup_keys(msg):
+    """
+    Tạo nhiều fingerprint để chống trùng noti tốt hơn:
+    - full text (mặc định)
+    - phần thân cảnh báo theo dõi lệnh (để bắt trường hợp có/không có dòng tiêu đề 📌 SYMBOL)
+    """
+    raw_text = str(msg or "")
+    keys = [hashlib.sha256(raw_text.encode("utf-8")).hexdigest()]
+
+    tracked_marker = "Theo dõi lệnh: báo khi ROI"
+    marker_idx = raw_text.find(tracked_marker)
+    if marker_idx >= 0:
+        normalized_text = raw_text[marker_idx:].strip()
+        keys.append(hashlib.sha256(normalized_text.encode("utf-8")).hexdigest())
+    return keys
+
 def send_telegram(msg):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-    try: HTTP_SESSION.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                           json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=HTTP_TIMEOUT)
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    now_ts = time.time()
+    msg_keys = build_telegram_dedup_keys(msg)
+    with _telegram_dedup_lock:
+        # Dọn cache cũ để tránh tăng bộ nhớ khi bot chạy lâu.
+        expired_keys = [k for k, ts in _telegram_recent_messages.items() if now_ts - ts > TELEGRAM_DEDUP_WINDOW_SECONDS]
+        for key in expired_keys:
+            _telegram_recent_messages.pop(key, None)
+
+        for key in msg_keys:
+            last_sent_ts = _telegram_recent_messages.get(key)
+            if last_sent_ts is not None and (now_ts - last_sent_ts) <= TELEGRAM_DEDUP_WINDOW_SECONDS:
+                print("[INFO] Skip duplicate Telegram message within dedup window.")
+                return
+        for key in msg_keys:
+            _telegram_recent_messages[key] = now_ts
+
+    try:
+        HTTP_SESSION.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=HTTP_TIMEOUT
+        )
     except Exception as e:
         print(f"[WARN] send_telegram exception: {e}")
 
@@ -639,6 +723,57 @@ class BingXClient:
     def get_vst_balance(self):
         return self.get_balance_info("VST").get("balance", 0.0)
 
+    def get_open_orders(self, symbol=SYMBOL, order_type=None):
+        """
+        Theo tài liệu BingX: /openApi/swap/v2/trade/openOrders dùng để truy vấn lệnh chờ,
+        bao gồm các lệnh TP/SL kiểu STOP_MARKET / TAKE_PROFIT_MARKET.
+        """
+        if not has_api_credentials():
+            return []
+        path = "/openApi/swap/v2/trade/openOrders"
+        params = {"timestamp": int(time.time() * 1000), "recvWindow": 5000}
+        if symbol:
+            params["symbol"] = symbol
+        if order_type:
+            params["type"] = order_type
+        try:
+            data = self._signed_request("GET", path, params, timeout=10)
+            if data.get("code") != 0:
+                return []
+            orders = data.get("data", [])
+            if isinstance(orders, dict):
+                orders = [orders]
+            return orders if isinstance(orders, list) else []
+        except Exception as e:
+            print(f"[WARN] get_open_orders exception: {e}")
+            return []
+
+    def get_position_protection_levels(self, symbol, pos_side):
+        """
+        Theo docs /user/positions không trả TP/SL.
+        TP/SL được lấy từ openOrders theo type lệnh bảo vệ.
+        """
+        tp = None
+        sl = None
+        orders = self.get_open_orders(symbol=symbol)
+        for order in orders:
+            order_side = str(order.get("positionSide") or "").upper()
+            if order_side and order_side != str(pos_side).upper():
+                continue
+            order_type = str(order.get("type") or "").upper()
+            stop_price = parse_trigger_price(order.get("stopPrice"))
+            if stop_price is None:
+                stop_price = parse_trigger_price(order.get("price"))
+            if stop_price is None:
+                continue
+            if ("TAKE_PROFIT" in order_type) and tp is None:
+                tp = stop_price
+            elif ("STOP" in order_type) and ("TAKE_PROFIT" not in order_type) and sl is None:
+                sl = stop_price
+            if tp is not None and sl is not None:
+                break
+        return tp, sl
+
     def get_open_position(self, symbol=SYMBOL):
         """
         Lấy vị thế đang mở của SYMBOL để tránh vào lệnh trùng/đóng lệnh ngoài ý muốn khi restart bot.
@@ -658,24 +793,11 @@ class BingXClient:
                 qty = float(p.get("positionAmt", 0) or 0)
                 if qty == 0:
                     continue
-                side = "LONG" if qty > 0 else "SHORT"
+                side = str(p.get("positionSide") or "").upper()
+                if side not in {"LONG", "SHORT"}:
+                    side = "LONG" if qty > 0 else "SHORT"
                 entry = float(p.get("avgPrice", 0) or 0)
-                tp = pick_first_float(
-                    parse_trigger_price(p.get("takeProfit")),
-                    parse_trigger_price(p.get("takeProfitPrice")),
-                    parse_trigger_price(p.get("tpPrice")),
-                    parse_trigger_price(p.get("tp")),
-                    parse_trigger_price(p.get("takeProfitOrder")),
-                    parse_trigger_price(p.get("tpOrder"))
-                )
-                sl = pick_first_float(
-                    parse_trigger_price(p.get("stopLoss")),
-                    parse_trigger_price(p.get("stopLossPrice")),
-                    parse_trigger_price(p.get("slPrice")),
-                    parse_trigger_price(p.get("sl")),
-                    parse_trigger_price(p.get("stopLossOrder")),
-                    parse_trigger_price(p.get("slOrder"))
-                )
+                tp, sl = self.get_position_protection_levels(symbol, side)
                 return {
                     "side": side,
                     "entry": entry,
@@ -685,7 +807,8 @@ class BingXClient:
                     "opened_at": now_vn(),
                     "unrealizedProfit": float(p.get("unrealizedProfit", 0) or 0),
                     "positionValue": float(p.get("positionValue", 0) or 0),
-                    "markPrice": float(p.get("markPrice", 0) or 0)
+                    "markPrice": float(p.get("markPrice", 0) or 0),
+                    "leverage": float(p.get("leverage", LEVERAGE) or LEVERAGE)
                 }
         except Exception as e:
             print(f"[WARN] get_open_position exception: {e}")
@@ -1511,6 +1634,28 @@ def calc_live_pnl_pct(position, last_price):
     pnl_pct = (pnl / margin_base) * 100 if margin_base else 0
     return pnl_pct
 
+def sync_position_levels_from_exchange(tracked_position, exchange_position):
+    """
+    Đồng bộ TP/SL và một số trường định lượng từ vị thế BingX sang position local.
+    Giúp noti hiển thị đúng khi API trả TP/SL muộn hoặc dưới dạng JSON lồng.
+    """
+    if not tracked_position or not exchange_position:
+        return tracked_position
+    if tracked_position.get("side") != exchange_position.get("side"):
+        return tracked_position
+
+    updated = dict(tracked_position)
+    for field in ("tp", "sl", "entry", "quantity", "positionValue", "leverage"):
+        incoming = exchange_position.get(field)
+        current = updated.get(field)
+        if field in ("tp", "sl"):
+            if current is None and incoming is not None:
+                updated[field] = incoming
+            continue
+        if (current is None or float(current or 0) <= 0) and incoming is not None:
+            updated[field] = incoming
+    return updated
+
 def check_breakeven_condition(pos, live_price, symbol=""):
     if pos.get("be_activated"):
         return pos
@@ -1992,6 +2137,12 @@ while True:
                         last_pnl_notified_pct_by_symbol[symbol] = {}
                         closed_cycle_pnl_by_symbol[symbol] = 0.0
                         continue
+                    else:
+                        active_positions_by_symbol[symbol] = [
+                            sync_position_levels_from_exchange(pos, exchange_pos)
+                            for pos in active_positions_by_symbol[symbol]
+                        ]
+                        active_positions = active_positions_by_symbol[symbol]
 
                 tracked_labels = {pos.get("label") for pos in active_positions if pos.get("label")}
                 last_pnl_notified_pct_by_symbol[symbol] = {
