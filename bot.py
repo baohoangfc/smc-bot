@@ -108,6 +108,7 @@ GRID_SL_FACTOR = float(os.environ.get("GRID_SL_FACTOR", "1.50"))
 GRID_MIN_QUALITY_SCORE = float(os.environ.get("GRID_MIN_QUALITY_SCORE", "2.10"))
 GRID_MIN_ATR_PCT = float(os.environ.get("GRID_MIN_ATR_PCT", "0.03"))
 GRID_MIN_CANDLES = max(20, GRID_ANCHOR_WINDOW + 2)
+WAIT_LOG_INTERVAL_SECONDS = int(os.environ.get("WAIT_LOG_INTERVAL_SECONDS", "60"))
 
 def parse_intervals(raw_value, fallback):
     intervals = [s.strip().lower() for s in (raw_value or "").split(",") if s.strip()]
@@ -1945,6 +1946,7 @@ closed_cycle_pnl_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 bootstrapped_signal_by_symbol = {symbol: False for symbol in SYMBOLS}
 last_entry_ts_by_symbol = {symbol: {} for symbol in SYMBOLS}
 last_skip_reason_by_symbol = {symbol: "Bot vừa khởi động, đang chờ tín hiệu hợp lệ đầu tiên." for symbol in SYMBOLS}
+last_wait_log_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 while True:
     try:
         for symbol in SYMBOLS:
@@ -2216,6 +2218,23 @@ while True:
                 print(f"[INFO] [{symbol}] Chưa vào lệnh. Lý do chờ: {wait_reason}")
                 send_telegram(format_status_msg(symbol, live_price, candle_time, wait_reason))
                 last_status_notify_ts_by_symbol[symbol] = time.time()
+
+
+            now_ts = time.time()
+            should_log_wait = (now_ts - last_wait_log_ts_by_symbol[symbol]) >= max(10, WAIT_LOG_INTERVAL_SECONDS)
+            if should_log_wait:
+                tf_ready = ", ".join(sorted(symbol_frames.keys())) if symbol_frames else "N/A"
+                position_state = (
+                    f"đang giữ {len(active_positions)} lệnh"
+                    if active_positions else
+                    f"chưa có lệnh mở ({len(active_positions)}/{current_max_active_orders(now_vn())})"
+                )
+                print(
+                    f"[STATE] [{symbol}] Bot đang chờ tín hiệu/nến mới | {position_state} | "
+                    f"TF cache: {tf_ready} | Giá hiện tại: {float(live_price):.4f} | "
+                    f"Lý do chờ gần nhất: {last_skip_reason_by_symbol.get(symbol, 'N/A')}"
+                )
+                last_wait_log_ts_by_symbol[symbol] = now_ts
 
             if active_positions:
                 if is_trading_enabled():
