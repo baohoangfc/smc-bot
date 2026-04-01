@@ -107,6 +107,7 @@ GRID_TP_FACTOR = float(os.environ.get("GRID_TP_FACTOR", "0.90"))
 GRID_SL_FACTOR = float(os.environ.get("GRID_SL_FACTOR", "1.50"))
 GRID_MIN_QUALITY_SCORE = float(os.environ.get("GRID_MIN_QUALITY_SCORE", "2.10"))
 GRID_MIN_ATR_PCT = float(os.environ.get("GRID_MIN_ATR_PCT", "0.03"))
+GRID_MIN_CANDLES = max(20, GRID_ANCHOR_WINDOW + 2)
 
 def parse_intervals(raw_value, fallback):
     intervals = [s.strip().lower() for s in (raw_value or "").split(",") if s.strip()]
@@ -1444,7 +1445,7 @@ def scan_grid_signal(df):
     Grid fast scalp: vào lệnh ngược chiều khi giá lệch khỏi anchor ngắn hạn theo từng "nấc lưới".
     Mục tiêu là ăn nhịp hồi nhanh với TP ngắn và SL cố định theo bội số của bước lưới.
     """
-    if not GRID_BOT_ENABLED or df is None or len(df) < max(20, GRID_ANCHOR_WINDOW + 2):
+    if not GRID_BOT_ENABLED or df is None or len(df) < GRID_MIN_CANDLES:
         return None
 
     latest = df.iloc[-2]
@@ -1471,6 +1472,10 @@ def scan_grid_signal(df):
     side = "SHORT" if deviation_pct > 0 else "LONG"
     tp_distance_pct = max(MIN_TP_PCT, level_size * level_idx * max(0.5, GRID_TP_FACTOR))
     sl_distance_pct = max(MIN_SL_PCT, level_size * level_idx * max(1.0, GRID_SL_FACTOR))
+    # Đảm bảo RR của grid không thấp hơn ngưỡng vào lệnh tối thiểu,
+    # tránh tạo tín hiệu rồi bị loại ngay ở gate tradeability.
+    min_tp_for_rr_pct = sl_distance_pct * max(0.5, MIN_ORDER_RR)
+    tp_distance_pct = max(tp_distance_pct, min_tp_for_rr_pct)
     if side == "LONG":
         tp = round(entry * (1 + tp_distance_pct / 100.0), 2)
         sl = round(entry * (1 - sl_distance_pct / 100.0), 2)
@@ -1939,6 +1944,7 @@ last_pnl_notified_pct_by_symbol = {symbol: {} for symbol in SYMBOLS}
 closed_cycle_pnl_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 bootstrapped_signal_by_symbol = {symbol: False for symbol in SYMBOLS}
 last_entry_ts_by_symbol = {symbol: {} for symbol in SYMBOLS}
+last_skip_reason_by_symbol = {symbol: "Bot vừa khởi động, đang chờ tín hiệu hợp lệ đầu tiên." for symbol in SYMBOLS}
 while True:
     try:
         for symbol in SYMBOLS:
@@ -1985,7 +1991,7 @@ while True:
 
             if GRID_BOT_ENABLED:
                 grid_df = symbol_frames.get(GRID_INTERVAL)
-                if grid_df is not None and len(grid_df) >= 3:
+                if grid_df is not None and len(grid_df) >= GRID_MIN_CANDLES:
                     grid_signal = scan_grid_signal(grid_df)
                     if grid_signal:
                         grid_signal = dict(grid_signal)
@@ -1998,21 +2004,26 @@ while True:
             if signal:
                 active_limit = current_max_active_orders(signal_eval_time)
                 if signal.get("source", DATA_SOURCE) != "BINGX":
+                    last_skip_reason_by_symbol[symbol] = f"Nguồn tín hiệu không hợp lệ: {signal.get('source')}"
                     print(f"[WARN] Bỏ qua tín hiệu do nguồn không phải BingX: {signal.get('source')}")
                     continue
                 quality_ok, quality_reason = passes_quality_gate(signal)
                 if not quality_ok:
+                    last_skip_reason_by_symbol[symbol] = quality_reason
                     print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {quality_reason}")
                     continue
                 tradeable, tradeable_reason = is_signal_tradeable(signal)
                 if not tradeable:
+                    last_skip_reason_by_symbol[symbol] = tradeable_reason
                     print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {tradeable_reason}")
                     continue
                 if not is_entry_still_valid(signal, float(live_price)):
+                    last_skip_reason_by_symbol[symbol] = f"Giá lệch khỏi entry quá {ENTRY_DRIFT_MAX_PCT:.2f}%."
                     print(f"[INFO] [{symbol}] Bỏ qua: giá đã drift xa khỏi entry signal.")
                     continue
                 liquidity_ok, liquidity_reason = passes_liquidity_focus(signal, signal_eval_time)
                 if not liquidity_ok:
+                    last_skip_reason_by_symbol[symbol] = liquidity_reason
                     print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {liquidity_reason}")
                     continue
                 sig_key = f"{signal['side']}_{signal.get('strategy', 'scalp')}_{signal.get('interval', INTERVAL)}_{signal['candle_time']}"
@@ -2022,6 +2033,7 @@ while True:
                 signal_cooldown = effective_signal_cooldown(signal)
                 if last_entry_ts and (now_ts - last_entry_ts < signal_cooldown):
                     remaining = int(signal_cooldown - (now_ts - last_entry_ts))
+                    last_skip_reason_by_symbol[symbol] = f"Đang cooldown {signal_bucket}, còn {max(remaining, 0)}s."
                     print(
                         f"[INFO] [{symbol}] Bỏ qua tín hiệu mới do cooldown {signal_bucket}: "
                         f"còn {max(remaining, 0)}s (cooldown={signal_cooldown}s)."
@@ -2037,6 +2049,7 @@ while True:
                             f"[INFO] [{symbol}] Bootstrapped signal: {sig_key} - chờ tín hiệu mới để vào lệnh. "
                             f"Lý do chờ: cần nến/tín hiệu mới sau khi bot khởi động lại để tránh vào trùng lệnh cũ."
                         )
+                        last_skip_reason_by_symbol[symbol] = "Bootstrap: bỏ qua tín hiệu đầu tiên sau khi restart."
                         continue
 
                 if sig_key != last_signal_key_by_symbol[symbol]:
@@ -2045,6 +2058,7 @@ while True:
                         order_label = f"LỆNH #{order_seq_by_symbol[symbol]}"
                         send_telegram(format_signal_msg(signal, symbol, order_label))
                         send_telegram("🧪 <b>Bỏ qua đặt lệnh tự động</b>\nLý do: bot đang ở chế độ READ-ONLY.")
+                        last_skip_reason_by_symbol[symbol] = "READ-ONLY mode: chỉ gửi tín hiệu, không đặt lệnh."
                         last_signal_key_by_symbol[symbol] = sig_key
                         continue
 
@@ -2078,6 +2092,9 @@ while True:
                         closed_cycle_pnl_by_symbol[symbol] = 0.0
 
                     if len(active_positions) >= active_limit:
+                        last_skip_reason_by_symbol[symbol] = (
+                            f"Đạt giới hạn lệnh mở ({len(active_positions)}/{active_limit})."
+                        )
                         print(
                             f"[INFO] [{symbol}] Đã đạt tối đa số lệnh giữ, bỏ qua tín hiệu mới. "
                             f"Lý do chờ: đang giữ {len(active_positions)}/{active_limit} lệnh, "
@@ -2135,6 +2152,7 @@ while True:
                     )
                     print(f"[{symbol}] Order Result: {order}")
                     if order and order.get("code") == 0:
+                        last_skip_reason_by_symbol[symbol] = "Đã vào lệnh thành công."
                         last_entry_ts_by_symbol[symbol][signal_bucket] = time.time()
                         fill_price = extract_order_avg_price(order, last_price)
                         send_telegram(format_order_result_msg(order_signal, symbol, order, order_label, fill_price))
@@ -2172,6 +2190,7 @@ while True:
                         last_pnl_notified_pct_by_symbol[symbol][order_label] = None
                     else:
                         err_msg = (order or {}).get("msg", "Không rõ lỗi")
+                        last_skip_reason_by_symbol[symbol] = f"Lỗi đặt lệnh: {err_msg}"
                         send_telegram(
                             "❌ <b>Đặt lệnh thất bại</b>\n"
                             f"Mã: <b>{symbol}</b>\n"
@@ -2191,7 +2210,8 @@ while True:
                     f"Chưa có tín hiệu mới phù hợp ở các TF đang theo dõi "
                     f"({', '.join(SIGNAL_INTERVALS)}), bot tiếp tục quan sát để chờ điểm vào có RR/quality tốt."
                     f" Ngưỡng quality tối thiểu hiện tại: {MIN_SIGNAL_QUALITY_SCORE:.2f}, "
-                    f"số lệnh tối đa: {active_limit}.{liquidity_note}"
+                    f"số lệnh tối đa: {active_limit}.{liquidity_note} "
+                    f"Lý do skip gần nhất: {last_skip_reason_by_symbol.get(symbol, 'N/A')}"
                 )
                 print(f"[INFO] [{symbol}] Chưa vào lệnh. Lý do chờ: {wait_reason}")
                 send_telegram(format_status_msg(symbol, live_price, candle_time, wait_reason))
