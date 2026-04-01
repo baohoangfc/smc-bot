@@ -1601,14 +1601,18 @@ def format_signal_msg(signal, symbol, order_label=None):
 def format_status_msg(symbol, last_price, candle_time, wait_reason=None):
     next_time = now_vn() + timedelta(hours=1)
     reason_text = wait_reason or "Chưa có setup đạt điều kiện vào lệnh ở các khung đang theo dõi."
+    if len(reason_text) > 420:
+        reason_text = reason_text[:417].rstrip() + "..."
+    tracked_tfs_text = ", ".join(SIGNAL_INTERVALS) if SIGNAL_INTERVALS else INTERVAL
     return (
         f"🤖 <b>SMC Bot - Cập nhật {format_vn_time(candle_time, '%H:%M')} (GMT+7)</b>\n\n"
         f"Giá {symbol} : <b>{format_price(last_price)}</b>\n"
         f"Khung TG    : <b>{INTERVAL}</b>\n"
+        f"TF theo dõi : <b>{tracked_tfs_text}</b>\n"
         f"Nguồn dữ liệu: <b>{DATA_SOURCE}</b>\n"
         f"Số dư VST   : <b>{get_vst_balance_text()}</b>\n"
         "Trạng thái  : ✅ <b>Đang chạy</b>\n\n"
-        "⏳ Chưa có tín hiệu. Đang theo dõi...\n\n"
+        "⏳ <b>Chưa có setup SMC đạt chuẩn, bot vẫn đang theo dõi...</b>\n\n"
         f"📝 Lý do chờ: <b>{reason_text}</b>\n\n"
         f"Cập nhật tiếp theo lúc <b>{format_vn_time(next_time, '%H:%M')}</b>"
     )
@@ -2205,14 +2209,12 @@ while True:
                 liquidity_note = ""
                 if LIQUIDITY_FOCUS_ENABLED and not is_high_liquidity_time(now_vn()):
                     liquidity_note = (
-                        f" Ngoài khung giờ thanh khoản cao ({LIQUIDITY_WINDOWS_VN_RAW}), "
-                        "bot sẽ lọc tín hiệu chặt hơn."
+                        f" Ngoài khung giờ thanh khoản cao ({LIQUIDITY_WINDOWS_VN_RAW}) nên bot lọc tín hiệu chặt hơn."
                     )
                 wait_reason = (
-                    f"Chưa có tín hiệu mới phù hợp ở các TF đang theo dõi "
-                    f"({', '.join(SIGNAL_INTERVALS)}), bot tiếp tục quan sát để chờ điểm vào có RR/quality tốt."
-                    f" Ngưỡng quality tối thiểu hiện tại: {MIN_SIGNAL_QUALITY_SCORE:.2f}, "
-                    f"số lệnh tối đa: {active_limit}.{liquidity_note} "
+                    f"Chưa có tín hiệu SMC mới ở các TF theo dõi ({', '.join(SIGNAL_INTERVALS)}). "
+                    f"Quality tối thiểu hiện tại: {MIN_SIGNAL_QUALITY_SCORE:.2f}; "
+                    f"giới hạn lệnh mở: {active_limit}.{liquidity_note} "
                     f"Lý do skip gần nhất: {last_skip_reason_by_symbol.get(symbol, 'N/A')}"
                 )
                 print(f"[INFO] [{symbol}] Chưa vào lệnh. Lý do chờ: {wait_reason}")
