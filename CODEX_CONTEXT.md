@@ -39,6 +39,14 @@
   - Giới hạn lệnh mở (`current_max_active_orders`)
   - Ghi chú thanh khoản (nếu bật `LIQUIDITY_FOCUS_ENABLED` và ngoài khung giờ mạnh)
   - Lý do skip gần nhất (`last_skip_reason_by_symbol`)
+- Điều kiện drift entry đang áp dụng:
+  - Trần drift mặc định `ENTRY_DRIFT_MAX_PCT=0.30` (đơn vị `%`).
+  - Nếu tín hiệu có `SL`, bot dùng ngưỡng động: `min(ENTRY_DRIFT_MAX_PCT, risk_pct * ENTRY_DRIFT_RISK_FRACTION)`.
+  - Mặc định `ENTRY_DRIFT_RISK_FRACTION=0.30` để độ lệch entry bám theo độ rộng setup (gần logic invalidation của SMC hơn ngưỡng cứng thuần túy).
+  - Bot skip khi `drift_pct > drift_limit_pct` (lớn hơn, không phải lớn hơn hoặc bằng).
+- Tần suất noti trạng thái chờ:
+  - Giới hạn theo từng symbol (mỗi symbol tối đa 1 lần/giờ khi không có lệnh mở).
+  - Nếu chạy nhiều symbol, noti có thể xuất hiện gần nhau theo phút nhưng khác symbol.
 
 ## 4) Quy ước khi thay đổi code (cho Codex)
 - Nếu sửa wording/format noti: cập nhật lại mục **3) Notification contract** trong file này.
@@ -58,4 +66,3 @@ Khi yêu cầu Codex chỉnh bot, nên ghi rõ:
 - Kênh nhận noti
 - Mẫu noti mong muốn (ví dụ cụ thể)
 - Phần nào chỉ sửa UI text và phần nào được phép sửa logic
-
