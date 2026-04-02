@@ -93,6 +93,7 @@ LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", 
 HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS", str(MAX_ACTIVE_ORDERS + 1)))
 LOW_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("LOW_LIQUIDITY_MAX_ACTIVE_ORDERS", str(max(1, MAX_ACTIVE_ORDERS - 1))))
 ENTRY_DRIFT_MAX_PCT = float(os.environ.get("ENTRY_DRIFT_MAX_PCT", "0.30"))
+ENTRY_DRIFT_RISK_FRACTION = float(os.environ.get("ENTRY_DRIFT_RISK_FRACTION", "0.30"))
 FALLBACK_MIN_QUALITY_SCORE = float(os.environ.get("FALLBACK_MIN_QUALITY_SCORE", "2.50"))
 FALLBACK_REQUIRE_HIGH_LIQUIDITY = os.environ.get("FALLBACK_REQUIRE_HIGH_LIQUIDITY", "true").lower() == "true"
 BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
@@ -370,20 +371,37 @@ def get_dynamic_rr_max(quality_score):
         return SCALP_RR_MAX_MED_QUALITY
     return max(SCALP_RR_MIN, SCALP_RR_MAX_MED_QUALITY - 0.3)
 
+def get_entry_drift_limit_pct(signal, max_drift_pct=None):
+    """
+    Ngưỡng drift theo %:
+    - Base cap: ENTRY_DRIFT_MAX_PCT
+    - Nếu có SL hợp lệ: lấy min(base cap, risk_pct * ENTRY_DRIFT_RISK_FRACTION)
+      để bám sát khoảng invalidation của setup.
+    """
+    cap_pct = float(ENTRY_DRIFT_MAX_PCT if max_drift_pct is None else max_drift_pct)
+    entry = float(signal.get("entry") or 0)
+    sl = float(signal.get("sl") or 0)
+    if entry <= 0 or sl <= 0:
+        return cap_pct
+    risk_pct = abs(entry - sl) / entry * 100.0
+    risk_based_pct = risk_pct * max(float(ENTRY_DRIFT_RISK_FRACTION), 0.0)
+    if risk_based_pct <= 0:
+        return cap_pct
+    return min(cap_pct, risk_based_pct)
+
 def is_entry_still_valid(signal, live_price, max_drift_pct=None):
-    if max_drift_pct is None:
-        max_drift_pct = ENTRY_DRIFT_MAX_PCT
+    drift_limit_pct = get_entry_drift_limit_pct(signal, max_drift_pct=max_drift_pct)
     entry = float(signal.get("entry") or 0)
     if entry <= 0 or live_price <= 0:
-        return True
+        return True, drift_limit_pct, 0.0
     drift_pct = abs(live_price - entry) / entry * 100.0
-    if drift_pct > max_drift_pct:
+    if drift_pct > drift_limit_pct:
         print(
             f"[DRIFT] Entry={entry:.2f}, live={live_price:.2f}, "
-            f"drift={drift_pct:.3f}% > max={max_drift_pct:.2f}% → BỎ QUA"
+            f"drift={drift_pct:.3f}% > max={drift_limit_pct:.2f}% → BỎ QUA"
         )
-        return False
-    return True
+        return False, drift_limit_pct, drift_pct
+    return True, drift_limit_pct, drift_pct
 
 def is_signal_tradeable(signal):
     """
@@ -2023,8 +2041,11 @@ while True:
                     last_skip_reason_by_symbol[symbol] = tradeable_reason
                     print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {tradeable_reason}")
                     continue
-                if not is_entry_still_valid(signal, float(live_price)):
-                    last_skip_reason_by_symbol[symbol] = f"Giá lệch khỏi entry quá {ENTRY_DRIFT_MAX_PCT:.2f}%."
+                entry_ok, drift_limit_pct, drift_pct = is_entry_still_valid(signal, float(live_price))
+                if not entry_ok:
+                    last_skip_reason_by_symbol[symbol] = (
+                        f"Giá lệch khỏi entry {drift_pct:.3f}% > ngưỡng {drift_limit_pct:.3f}%."
+                    )
                     print(f"[INFO] [{symbol}] Bỏ qua: giá đã drift xa khỏi entry signal.")
                     continue
                 liquidity_ok, liquidity_reason = passes_liquidity_focus(signal, signal_eval_time)
