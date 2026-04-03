@@ -2,6 +2,7 @@
 bot.py — Trái tim của SMC Bot. Chứa loop chính (Data Fetching + Signal Scan + Execution).
 Đã được refactor tách thành các module chuyên biệt: config, utils, state, learning, position_mgmt, signals.
 """
+import os
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
