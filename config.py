@@ -111,6 +111,10 @@ LEARNING_SAVE_INTERVAL = int(os.environ.get("LEARNING_SAVE_INTERVAL", "60"))
 FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS_JSON", "")
 FIRESTORE_COLLECTION      = os.environ.get("FIRESTORE_COLLECTION", "smc_bot_state")
 
+# ===================== Google Sheets Persistence =====================
+GOOGLE_SHEETS_CREDENTIALS_JSON = os.environ.get("GOOGLE_SHEETS_CREDENTIALS_JSON", "")
+GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "")
+
 # ===================== Misc =====================
 HTTP_TIMEOUT             = float(os.environ.get("HTTP_TIMEOUT", "15"))
 TELEGRAM_DEDUP_WINDOW_SECONDS = float(os.environ.get("TELEGRAM_DEDUP_WINDOW_SECONDS", "20"))

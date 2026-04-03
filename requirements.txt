@@ -2,3 +2,5 @@ requests==2.31.0
 pandas==2.1.4
 numpy==1.26.3
 firebase-admin==6.5.0
+gspread>=5.10.0
+oauth2client>=4.1.3

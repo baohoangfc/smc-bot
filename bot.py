@@ -435,6 +435,11 @@ while True:
                         for pos in active_positions:
                             pnl_snapshot = calc_live_pnl(pos, float(live_price))
                             update_learning_state(learning_state, symbol, pos.get("strategy", "scalp"), pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot)
+                            try:
+                                from gsheets import export_trade_to_sheet
+                                export_trade_to_sheet(pos, pnl_snapshot, float(live_price), symbol)
+                            except Exception:
+                                pass
                         mark_learning_dirty(learning_meta)
                         closed_cycle_pnl_by_symbol[symbol] += sum(calc_live_pnl(pos, float(live_price)) for pos in active_positions)
                         send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
