@@ -61,8 +61,8 @@ MIN_ORDER_RR     = float(os.environ.get("MIN_ORDER_RR", "1.0"))
 SWING_RR_TARGET  = float(os.environ.get("SWING_RR_TARGET", "2.4"))
 
 # ===================== Entry / Drift =====================
-ENTRY_DRIFT_MAX_PCT        = float(os.environ.get("ENTRY_DRIFT_MAX_PCT", "0.30"))
-ENTRY_DRIFT_RISK_FRACTION  = float(os.environ.get("ENTRY_DRIFT_RISK_FRACTION", "0.30"))
+ENTRY_DRIFT_MAX_PCT        = float(os.environ.get("ENTRY_DRIFT_MAX_PCT", "1.0"))
+ENTRY_DRIFT_RISK_FRACTION  = float(os.environ.get("ENTRY_DRIFT_RISK_FRACTION", "0.6"))
 
 # ===================== Signal Engine =====================
 ALLOW_FALLBACK_SIGNAL          = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true").lower() == "true"
