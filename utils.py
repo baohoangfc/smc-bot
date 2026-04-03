@@ -199,9 +199,8 @@ def get_entry_drift_limit_pct(signal, max_drift_pct=None):
         return cap_pct
     risk_pct = abs(entry - sl) / entry * 100.0
     risk_based_pct = risk_pct * max(float(ENTRY_DRIFT_RISK_FRACTION), 0.0)
-    if risk_based_pct <= 0:
-        return cap_pct
-    return min(cap_pct, risk_based_pct)
+    # Cấu hình để luôn cho phép sai lệch ít nhất là cap_pct (ví dụ 1.0%)
+    return max(cap_pct, risk_based_pct)
 
 
 def is_entry_still_valid(signal, live_price, max_drift_pct=None):
