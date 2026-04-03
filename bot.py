@@ -1918,25 +1918,27 @@ def decide_positions_to_close(active_positions, incoming_side, live_price, max_a
 # 4. BACKGROUND FETCH & MAIN LOOP
 # ==========================================
 _df_cache = {symbol: {} for symbol in SYMBOLS}; _lock = threading.Lock()
-def _bg_fetcher():
+
+def _bg_fetcher_for_symbol(symbol):
+    """Thread riêng per symbol: fetch độc lập, không bị delay bởi symbol khác."""
     while True:
         try:
-            for symbol in SYMBOLS:
-                for tf in SIGNAL_INTERVALS:
-                    df = fetch_data(symbol, tf)
-                    if df is None:
-                        continue
-                    df = add_indicators(df)
-                    if df is None or len(df) == 0 or "close" not in df.columns:
-                        continue
-                    with _lock:
-                        _df_cache[symbol][tf] = df
-                    print(f"[BG] Updated {symbol} {tf} | Close: {df['close'].iloc[-1]}")
+            for tf in SIGNAL_INTERVALS:
+                df = fetch_data(symbol, tf)
+                if df is None:
+                    continue
+                df = add_indicators(df)
+                if df is None or len(df) == 0 or "close" not in df.columns:
+                    continue
+                with _lock:
+                    _df_cache[symbol][tf] = df
+                print(f"[BG] Updated {symbol} {tf} | Close: {df['close'].iloc[-1]}")
         except Exception as e:
-            print(f"[WARN] _bg_fetcher exception: {e}")
+            print(f"[WARN] _bg_fetcher [{symbol}] exception: {e}")
         time.sleep(30)
 
-threading.Thread(target=_bg_fetcher, daemon=True).start()
+for _sym in SYMBOLS:
+    threading.Thread(target=_bg_fetcher_for_symbol, args=(_sym,), daemon=True, name=f"bg_{_sym}").start()
 time.sleep(10) # Đợi dữ liệu lần đầu
 
 vst_bal = bing_client.get_vst_balance() if has_api_credentials() else 0.0
@@ -2299,84 +2301,27 @@ while True:
                             active_positions_by_symbol[symbol][i] = pos
                             break
                     active_positions = active_positions_by_symbol[symbol]
-                    if pos.get("tp") is not None:
-                        if pos["side"] == "LONG" and float(live_price) >= float(pos["tp"]):
-                            pnl_snapshot = calc_live_pnl(pos, float(live_price))
-                            close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
+                    # TP/SL được đặt trực tiếp trên sàn → sàn tự đóng lệnh khi chạm.
+                    # Bot chỉ đảm bảo TP/SL luôn tồn tại (guard), không tự đóng lệnh.
+                    if is_trading_enabled() and (pos.get("tp") is not None or pos.get("sl") is not None):
+                        tp_on_exchange, sl_on_exchange = bing_client.get_position_protection_levels(symbol, pos["side"])
+                        missing_tp = pos.get("tp") is not None and tp_on_exchange is None
+                        missing_sl = pos.get("sl") is not None and sl_on_exchange is None
+                        if missing_tp or missing_sl:
+                            print(
+                                f"[GUARD] [{symbol}] {pos.get('label')} thiếu TP/SL trên sàn "
+                                f"(TP={'Thiếu' if missing_tp else 'OK'}, SL={'Thiếu' if missing_sl else 'OK'}). "
+                                f"Đặt lại..."
+                            )
+                            bing_client.add_missing_tp_sl(
+                                symbol, pos["side"],
+                                pos.get("tp") if missing_tp else None,
+                                pos.get("sl") if missing_sl else None,
+                            )
                             send_telegram(
-                                f"🏁 <b>{symbol} - {pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
-                                f"💵 PnL khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>"
+                                f"🛡️ <b>[GUARD] {symbol} - {pos.get('label')}</b>: Phát hiện thiếu TP/SL trên sàn, đã đặt lại.\n"
+                                f"TP: <b>{'Đặt lại' if missing_tp else 'OK'}</b> | SL: <b>{'Đặt lại' if missing_sl else 'OK'}</b>"
                             )
-                            active_positions_by_symbol[symbol].remove(pos)
-                            closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
-                            update_learning_state(
-                                learning_state, symbol, pos.get("strategy", "scalp"),
-                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
-                            )
-                            mark_learning_dirty(learning_meta)
-                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label"), None)
-                            if not active_positions_by_symbol[symbol]:
-                                send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
-                                closed_cycle_pnl_by_symbol[symbol] = 0.0
-                            continue
-                        if pos["side"] == "SHORT" and float(live_price) <= float(pos["tp"]):
-                            pnl_snapshot = calc_live_pnl(pos, float(live_price))
-                            close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
-                            send_telegram(
-                                f"🏁 <b>{symbol} - {pos.get('label')} đã chạm TP</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
-                                f"💵 PnL khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>"
-                            )
-                            active_positions_by_symbol[symbol].remove(pos)
-                            closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
-                            update_learning_state(
-                                learning_state, symbol, pos.get("strategy", "scalp"),
-                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
-                            )
-                            mark_learning_dirty(learning_meta)
-                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label"), None)
-                            if not active_positions_by_symbol[symbol]:
-                                send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
-                                closed_cycle_pnl_by_symbol[symbol] = 0.0
-                            continue
-                    if pos.get("sl") is not None:
-                        if pos["side"] == "LONG" and float(live_price) <= float(pos["sl"]):
-                            pnl_snapshot = calc_live_pnl(pos, float(live_price))
-                            close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
-                            send_telegram(
-                                f"🛑 <b>{symbol} - {pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
-                                f"💵 PnL khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>"
-                            )
-                            active_positions_by_symbol[symbol].remove(pos)
-                            closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
-                            update_learning_state(
-                                learning_state, symbol, pos.get("strategy", "scalp"),
-                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
-                            )
-                            mark_learning_dirty(learning_meta)
-                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label"), None)
-                            if not active_positions_by_symbol[symbol]:
-                                send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
-                                closed_cycle_pnl_by_symbol[symbol] = 0.0
-                            continue
-                        if pos["side"] == "SHORT" and float(live_price) >= float(pos["sl"]):
-                            pnl_snapshot = calc_live_pnl(pos, float(live_price))
-                            close_resp = bing_client.close_position_market(symbol, pos["side"], pos.get("quantity"))
-                            send_telegram(
-                                f"🛑 <b>{symbol} - {pos.get('label')} đã chạm SL</b> | Đóng market: <b>{'OK' if (close_resp or {}).get('code') == 0 else 'Fail'}</b>\n"
-                                f"💵 PnL khi đóng: <b>{pnl_snapshot:+.2f} USDT</b>"
-                            )
-                            active_positions_by_symbol[symbol].remove(pos)
-                            closed_cycle_pnl_by_symbol[symbol] += pnl_snapshot
-                            update_learning_state(
-                                learning_state, symbol, pos.get("strategy", "scalp"),
-                                pos.get("interval", INTERVAL), pos.get("side"), pnl_snapshot
-                            )
-                            mark_learning_dirty(learning_meta)
-                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label"), None)
-                            if not active_positions_by_symbol[symbol]:
-                                send_telegram(format_closed_positions_summary(symbol, closed_cycle_pnl_by_symbol[symbol]))
-                                closed_cycle_pnl_by_symbol[symbol] = 0.0
-                            continue
 
                     label = pos.get("label", "")
                     pnl_pct = calc_live_pnl_pct(pos, float(live_price))
