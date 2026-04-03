@@ -3,10 +3,21 @@
 > Mục tiêu: Tổng hợp trạng thái code mới nhất để Codex có thể đọc nhanh và sửa đúng ngữ cảnh khi có thay đổi.
 
 ## 1) Version snapshot
-- Context version: `v2026.04.01-1`
+- Context version: `v2026.04.03-1`
 - Repo chính hiện tại: `smc-bot`
 - File runtime cốt lõi: `bot.py`
 - Các file hỗ trợ: `requirements.txt`, `Dockerfile`, `railway.toml`, `SMC_AUDIT.md`
+
+## 1b) Thay đổi Phase 1 (04/04/2026)
+- **Fix**: `scan_signal_backtest_v5` giờ tính và trả về `quality_score` (dựa OB body ratio, RSI zone, ATR%, EMA200 alignment). Trước đây thiếu field này khiến signal bị quality gate loại toàn bộ.
+- **Fix**: Docstring của `scan_signal` đặt đúng vị trí đầu hàm (trước đây nằm sau `return` là dead code).
+- **New**: Firebase Firestore persistent state layer (optional, backward-compatible):
+  - `FIREBASE_CREDENTIALS_JSON` env var → Firestore client lazy-init
+  - `load_learning_state` / `save_learning_state` → ưu tiên Firestore, fallback file local
+  - `load_active_positions` / `save_active_positions` → persist `active_positions_by_symbol` qua restart
+  - `save_active_positions` được gọi tại mọi điểm mutation (thêm lệnh, đóng lệnh, reset sau đóng hết)
+- **Startup**: Khôi phục positions từ Firestore/file trước, sau đó check vị thế thực trên sàn, tránh đánh số label trùng.
+- **Deps**: `firebase-admin==6.5.0` thêm vào `requirements.txt`
 
 ## 2) Luồng bot hiện tại (rút gọn)
 1. Lấy dữ liệu giá/khung thời gian.
