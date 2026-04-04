@@ -201,6 +201,7 @@ bootstrapped_signal_by_symbol = {symbol: False for symbol in SYMBOLS}
 last_entry_ts_by_symbol = {symbol: {} for symbol in SYMBOLS}
 last_skip_reason_by_symbol = {symbol: "Bot vừa khởi động, đang chờ tín hiệu hợp lệ đầu tiên." for symbol in SYMBOLS}
 last_wait_log_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
+last_tp_sl_sync_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 
 
 while True:
@@ -472,15 +473,19 @@ while True:
                             
                     active_positions = active_positions_by_symbol[symbol]
                     
+                    now_ts = time.time()
                     if is_trading_enabled() and (pos.get("tp") is not None or pos.get("sl") is not None):
-                        tp_on_exchange, sl_on_exchange = bing_client.get_position_protection_levels(symbol, pos["side"])
-                        missing_tp, missing_sl = pos.get("tp") is not None and tp_on_exchange is None, pos.get("sl") is not None and sl_on_exchange is None
-                        if missing_tp or missing_sl:
-                            bing_client.add_missing_tp_sl(
-                                symbol, pos["side"],
-                                pos.get("tp") if missing_tp else None,
-                                pos.get("sl") if missing_sl else None,
-                            )
+                        # Giảm tần suất gọi API check/update TP/SL để tránh Rate Limit (Error 109429)
+                        if (now_ts - last_tp_sl_sync_ts_by_symbol.get(symbol, 0.0)) >= 120:
+                            tp_on_exchange, sl_on_exchange = bing_client.get_position_protection_levels(symbol, pos["side"])
+                            missing_tp, missing_sl = pos.get("tp") is not None and tp_on_exchange is None, pos.get("sl") is not None and sl_on_exchange is None
+                            if missing_tp or missing_sl:
+                                bing_client.add_missing_tp_sl(
+                                    symbol, pos["side"],
+                                    pos.get("tp") if missing_tp else None,
+                                    pos.get("sl") if missing_sl else None,
+                                )
+                            last_tp_sl_sync_ts_by_symbol[symbol] = now_ts
 
                     label = pos.get("label", "")
                     pnl_pct = calc_live_pnl_pct(pos, float(live_price))
