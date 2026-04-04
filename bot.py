@@ -202,6 +202,14 @@ last_entry_ts_by_symbol = {symbol: {} for symbol in SYMBOLS}
 last_skip_reason_by_symbol = {symbol: "Bot vừa khởi động, đang chờ tín hiệu hợp lệ đầu tiên." for symbol in SYMBOLS}
 last_wait_log_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 last_tp_sl_sync_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
+last_gsheet_active_sync_ts = 0.0
+
+try:
+    from gsheets import setup_dashboard
+    setup_dashboard()
+except Exception as e:
+    print(f"[WARN] setup_dashboard failed: {e}")
+
 
 
 while True:
@@ -500,6 +508,16 @@ while True:
                         last_pnl_notified_pct_by_symbol[symbol][label] = pnl_pct
 
             maybe_flush_learning_state(learning_state, learning_meta)
+
+        # Định kỳ cập nhật trạng thái các lệnh lên Google Sheet 'Active_Positions' (ví dụ mỗi 5 phút)
+        if is_trading_enabled() and (time.time() - last_gsheet_active_sync_ts >= 300):
+            try:
+                from gsheets import export_active_positions
+                latest_prices = {s: float(bing_client.get_last_price(s) or 0) for s in SYMBOLS}
+                export_active_positions(active_positions_by_symbol, latest_prices)
+                last_gsheet_active_sync_ts = time.time()
+            except Exception as e:
+                pass
 
         time.sleep(10)
     except Exception as e:
