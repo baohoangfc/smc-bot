@@ -211,6 +211,75 @@ def setup_dashboard():
         ]
         
         ws.update(data, 'A1')
-        print("[GSHEETS] Setup Dashboard thành công.")
+        print("[GSHEETS] Đã điền công thức Dashboard.")
+        
+        # Tạo biểu đồ
+        try:
+            sp = _get_spreadsheet()
+            dashboard_id = ws.id
+            history_id = None
+            try:
+                history_id = sp.sheet1.id
+            except:
+                pass
+                
+            requests = []
+            
+            # Biểu đồ tròn: Win/Loss Ratio
+            requests.append({
+                "addChart": {
+                    "chart": {
+                        "spec": {
+                            "title": "Tỉ Lệ Thắng/Thua",
+                            "pieChart": {
+                                "legendPosition": "RIGHT_LEGEND",
+                                "domain": {"sourceRange": {"sources": [{"sheetId": dashboard_id, "startRowIndex": 3, "endRowIndex": 5, "startColumnIndex": 0, "endColumnIndex": 1}]}},
+                                "series": {"sourceRange": {"sources": [{"sheetId": dashboard_id, "startRowIndex": 3, "endRowIndex": 5, "startColumnIndex": 1, "endColumnIndex": 2}]}}
+                            }
+                        },
+                        "position": {
+                            "overlayPosition": {
+                                "anchorCell": {"sheetId": dashboard_id, "rowIndex": 1, "columnIndex": 3},
+                                "widthPixels": 400, "heightPixels": 280
+                            }
+                        }
+                    }
+                }
+            })
+            
+            # Biểu đồ cột: PnL theo lệnh
+            if history_id is not None:
+                requests.append({
+                    "addChart": {
+                        "chart": {
+                            "spec": {
+                                "title": "Hiệu Suất Lợi Nhuận (PnL History)",
+                                "basicChart": {
+                                    "chartType": "COLUMN",
+                                    "legendPosition": "BOTTOM_LEGEND",
+                                    "axis": [
+                                        {"position": "BOTTOM_AXIS", "title": "Các Khớp Lệnh"},
+                                        {"position": "LEFT_AXIS", "title": "USDT"}
+                                    ],
+                                    "series": [{
+                                        "series": {"sourceRange": {"sources": [{"sheetId": history_id, "startRowIndex": 1, "startColumnIndex": 10, "endColumnIndex": 11}]}}
+                                    }]
+                                }
+                            },
+                            "position": {
+                                "overlayPosition": {
+                                    "anchorCell": {"sheetId": dashboard_id, "rowIndex": 11, "columnIndex": 0},
+                                    "widthPixels": 600, "heightPixels": 350
+                                }
+                            }
+                        }
+                    }
+                })
+                
+            sp.batch_update({"requests": requests})
+            print("[GSHEETS] Tạo biểu đồ Dashboard thành công.")
+        except Exception as e:
+            print(f"[WARN] Lỗi vẽ biểu đồ Dashboard: {e}")
+            
     except Exception as e:
         print(f"[WARN] setup_dashboard lỗi: {e}")
