@@ -142,8 +142,10 @@ def scan_signal_strict(df: pd.DataFrame, symbol_frames: dict = None, current_tf:
     bullish_bias = ema50 > ema200 and close_price > ema50 and close_price > recent_trend_low
     bearish_bias = ema50 < ema200 and close_price < ema50 and close_price < recent_trend_high
 
-    liquidity_sweep_low  = float(last_closed["low"]) < swing_low  and close_price > swing_low
-    liquidity_sweep_high = float(last_closed["high"]) > swing_high and close_price < swing_high
+    recent_5_low  = float(df["low"].iloc[-6:-1].min())
+    recent_5_high = float(df["high"].iloc[-6:-1].max())
+    liquidity_sweep_low  = recent_5_low < swing_low and close_price > swing_low
+    liquidity_sweep_high = recent_5_high > swing_high and close_price < swing_high
     
     # MSS now depends on structure change (BOS or CHOCH in the right direction)
     mss_bull = struct.get("bos") == "BULL_BOS" or struct.get("choch") == "BULL_CHOCH"
@@ -164,15 +166,26 @@ def scan_signal_strict(df: pd.DataFrame, symbol_frames: dict = None, current_tf:
     quality_score += min(0.8, trend_strength * 0.8)
     quality_score += min(0.6, atr_pct * 0.25)
     
+    # Premium/Discount Quality Modifier (Soft Filter)
+    if in_discount and (bullish_bias or mss_bull):
+        quality_score += 0.5
+    elif in_premium and (bullish_bias or mss_bull):
+        quality_score -= 0.5
+        
+    if in_premium and (bearish_bias or mss_bear):
+        quality_score += 0.5
+    elif in_discount and (bearish_bias or mss_bear):
+        quality_score -= 0.5
+    
     if htf_trend:
         if (bullish_bias and htf_trend == "BEARISH") or (bearish_bias and htf_trend == "BULLISH"):
             quality_score -= 0.6
         elif (bullish_bias and htf_trend == "BULLISH") or (bearish_bias and htf_trend == "BEARISH"):
             quality_score += 0.4
 
-    long_strict   = bullish_bias and liquidity_sweep_low  and (mss_bull or mss_bull_lite) and in_discount
-    short_strict  = bearish_bias and liquidity_sweep_high and (mss_bear or mss_bear_lite) and in_premium
-    long_smc_lite = bullish_bias and (mss_bull or mss_bull_lite) and (liquidity_sweep_low  or in_discount)
+    long_strict   = bullish_bias and liquidity_sweep_low  and (mss_bull or mss_bull_lite)
+    short_strict  = bearish_bias and liquidity_sweep_high and (mss_bear or mss_bear_lite)
+    long_smc_lite = bullish_bias and (mss_bull or mss_bull_lite) and (liquidity_sweep_low or in_discount)
     short_smc_lite = bearish_bias and (mss_bear or mss_bear_lite) and (liquidity_sweep_high or in_premium)
 
     near_ema50 = abs(close_price - ema50) <= max(0.5, close_price * 0.0035)

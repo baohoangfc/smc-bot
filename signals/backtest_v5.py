@@ -77,11 +77,9 @@ def scan_signal_backtest_v5(df: pd.DataFrame, symbol_frames: dict = None, curren
             body  = abs(c2 - o); rng = h - l
             if c2 < o and rng > 0 and (body / rng) > 0.35 and body > atr * 0.25:
                 if not any(float(df["close"].iloc[k]) < l for k in range(j + 1, i)):
-                    # Bắt buộc POI phải tạo ra FVG liền kề (Imbalance)
                     fvg = find_fvg_close_to_price(df, j + 2, h, "LONG", lookback=3)
-                    if fvg:
-                        ob = {"type": "BULL_OB", "hi": h, "lo": l, "mid": (h + l) / 2, "fvg": fvg}
-                        break
+                    ob = {"type": "BULL_OB", "hi": h, "lo": l, "mid": (h + l) / 2, "fvg": fvg}
+                    break
     else:
         for j in range(i - 1, start - 1, -1):
             o, c2 = float(df["open"].iloc[j]), float(df["close"].iloc[j])
@@ -90,9 +88,8 @@ def scan_signal_backtest_v5(df: pd.DataFrame, symbol_frames: dict = None, curren
             if c2 > o and rng > 0 and (body / rng) > 0.35 and body > atr * 0.25:
                 if not any(float(df["close"].iloc[k]) > h for k in range(j + 1, i)):
                     fvg = find_fvg_close_to_price(df, j + 2, l, "SHORT", lookback=3)
-                    if fvg:
-                        ob = {"type": "BEAR_OB", "hi": h, "lo": l, "mid": (h + l) / 2, "fvg": fvg}
-                        break
+                    ob = {"type": "BEAR_OB", "hi": h, "lo": l, "mid": (h + l) / 2, "fvg": fvg}
+                    break
     if not ob:
         return None
 
@@ -124,8 +121,9 @@ def scan_signal_backtest_v5(df: pd.DataFrame, symbol_frames: dict = None, curren
             return None
         tp      = entry + risk * RR
         quality = _calc_bv5_quality(ob, rsi, atr, c, ema200, "BULL") - htf_penalty
-        if quality + htf_penalty > 0:
-            quality += 0.2 # Thưởng thêm nếu có FVG hợp lệ
+        if ob.get("fvg"):
+            fvg_size = abs(ob["fvg"]["top"] - ob["fvg"]["bot"])
+            quality += 0.2 + min(0.5, (fvg_size / atr) * 0.4)
         return {
             "side": "LONG", "entry": round(entry, 2), "sl": round(sl_, 2), "tp": round(tp, 2),
             "rr": RR, "quality_score": quality,
@@ -144,8 +142,9 @@ def scan_signal_backtest_v5(df: pd.DataFrame, symbol_frames: dict = None, curren
             return None
         tp      = entry - risk * RR
         quality = _calc_bv5_quality(ob, rsi, atr, c, ema200, "BEAR") - htf_penalty
-        if quality + htf_penalty > 0:
-            quality += 0.2
+        if ob.get("fvg"):
+            fvg_size = abs(ob["fvg"]["top"] - ob["fvg"]["bot"])
+            quality += 0.2 + min(0.5, (fvg_size / atr) * 0.4)
         return {
             "side": "SHORT", "entry": round(entry, 2), "sl": round(sl_, 2), "tp": round(tp, 2),
             "rr": RR, "quality_score": quality,
