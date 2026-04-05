@@ -5,7 +5,7 @@ bot.py — Trái tim của SMC Bot. Chứa loop chính (Data Fetching + Signal S
 import os
 import time
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask
 
 # Các cấu hình và biến toàn cục
 from config import (
@@ -57,26 +57,22 @@ from learning import apply_learning_to_signal_v2, update_learning_state
 
 
 # ==========================================
-# 0. SERVER DUMMY CHỐNG RENDER SLEEP
 # ==========================================
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html")
-        self.end_headers()
-        self.wfile.write(b"SMC Bot is running!")
-    def log_message(self, format, *args):
-        pass # Tắt log HTTP request
+# 0. SERVER HEALTHCHECK (FLASK)
+# ==========================================
+app = Flask(__name__)
+
+@app.route("/")
+def health_check():
+    return "SMC Bot is running!", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
-    print(f"[SYSTEM] Khởi chạy Healthcheck Server tại Port {port}...")
+    print(f"[SYSTEM] Khởi chạy Healthcheck Flask Server tại Port {port}...")
     try:
-        server = HTTPServer(("0.0.0.0", port), HealthHandler)
-        print(f"[SYSTEM] Healthcheck Server đã sẵn sàng đáp ứng Railway!")
-        server.serve_forever()
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     except Exception as e:
-        print(f"[ERROR] Không thể khởi chạy Healthcheck Server: {e}")
+        print(f"[ERROR] Không thể khởi chạy Flask Server: {e}")
 
 # Chạy server trong một luồng riêng ngay lập tức
 threading.Thread(target=run_health_server, daemon=True, name="HealthServer").start()

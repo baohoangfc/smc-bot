@@ -5,4 +5,6 @@ builder = "DOCKERFILE"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
 healthcheckPath = "/"
-healthcheckTimeout = 10
+healthcheckTimeout = 45
+startPeriod = 60
+numReplicas = 1
