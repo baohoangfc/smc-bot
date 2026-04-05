@@ -164,15 +164,18 @@ def format_pnl_msg(position, last_price, pnl, pnl_pct, notional_pnl_pct):
     qty        = float(position.get("quantity", 0) or 0)
     entry      = float(position.get("entry", 0) or 0)
     pnl_emoji  = "🟢" if pnl >= 0 else "🔴"
-    tp_text    = format_price(position.get("tp")) if position.get("tp") is not None else "Chưa có"
-    sl_text    = format_price(position.get("sl")) if position.get("sl") is not None else "Chưa có"
-    rr_text    = format_rr_text(
-        side, entry, position.get("tp"), position.get("sl"),
-        fallback_rr=position.get("rr"), decimals=2
-    )
+    tp_val = position.get("tp")
+    sl_val = position.get("sl")
+    tp_text = format_price(tp_val) if tp_val is not None else "<i>(Đang đồng bộ...)</i>"
+    sl_text = format_price(sl_val) if sl_val is not None else "<i>(Đang đồng bộ...)</i>"
+    
+    rr_text = "N/A"
+    if tp_val is not None and sl_val is not None:
+        rr_text = format_rr_text(side, entry, tp_val, sl_val, fallback_rr=position.get("rr"), decimals=2)
+    
     order_label = position.get("label", "LỆNH")
     return (
-        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi ROI (PnL% trên ký quỹ) biến động ±10% so với lần báo trước</b>\n\n"
+        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi ROI biến động ±10%</b>\n\n"
         f"🆔 Mã lệnh  : <b>{order_label}</b>\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"

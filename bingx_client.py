@@ -196,7 +196,9 @@ class BingXClient:
                     "unrealizedProfit": float(p.get("unrealizedProfit", 0) or 0),
                     "positionValue": float(p.get("positionValue", 0) or 0),
                     "markPrice": float(p.get("markPrice", 0) or 0),
-                    "leverage": float(p.get("leverage", LEVERAGE) or LEVERAGE)
+                    "leverage": float(p.get("leverage", LEVERAGE) or LEVERAGE),
+                    "notional": abs(float(p.get("positionValue", 0) or 0)),
+                    "margin": float(p.get("isolatedMargin", 0) or 0) or (abs(float(p.get("positionValue", 0) or 0)) / float(p.get("leverage", 100) or 100))
                 }
         except Exception as e:
             print(f"[WARN] get_open_position exception: {e}")

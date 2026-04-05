@@ -92,12 +92,19 @@ def passes_liquidity_focus(signal: dict, dt_value=None) -> tuple[bool, str]:
 # ───────────────────────────────────────────
 
 def calc_live_pnl(position: dict, last_price: float) -> float:
+    # Ưu tiên lấy số PnL thực từ sàn (cho tài khoản VST/Real) để khớp 100% với App
+    from_exchange = position.get("unrealizedProfit")
+    if from_exchange is not None:
+        return float(from_exchange)
+        
     side       = position.get("side")
     qty        = float(position.get("quantity", 0) or 0)
     entry      = float(position.get("entry", 0) or 0)
     last_price = float(last_price or 0)
+    
     if qty <= 0 or entry <= 0 or last_price <= 0:
-        return float(position.get("unrealizedProfit", 0) or 0)
+        return 0.0
+        
     if side == "LONG":
         return (last_price - entry) * qty
     return (entry - last_price) * qty
