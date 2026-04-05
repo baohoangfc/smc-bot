@@ -2,7 +2,7 @@
 learning.py — Learning state: track win/loss per strategy-interval-side, adjust quality/RR.
 """
 from config import (
-    LEARNING_ENABLED, LEARNING_MIN_TRADES, ORDER_NOTIONAL_USDT, RR,
+    LEARNING_ENABLED, LEARNING_MIN_TRADES, MARGIN_STANDARD, RR,
     INTERVAL,
 )
 from utils import align_tp_sl_with_rr, _clamp
@@ -49,7 +49,7 @@ def apply_learning_to_signal_v2(state, symbol, signal):
     win_rate = float(row.get("win_rate", 0.0))
     avg_pnl  = float(row.get("avg_pnl", 0.0))
 
-    norm_base    = max(ORDER_NOTIONAL_USDT * 0.02, 1.0)
+    norm_base    = max(MARGIN_STANDARD * 0.5, 12.0) # 50% của Margin chuẩn $25 làm mốc chuẩn
     norm_pnl     = avg_pnl / norm_base
     quality_adjust = _clamp((win_rate - 0.5) * 0.8 + norm_pnl * 0.5, -0.6, 0.6)
     learned_signal["quality_score"] = round(float(learned_signal.get("quality_score", 2.0)) + quality_adjust, 2)
