@@ -7,7 +7,7 @@ import threading
 from config import (
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, HTTP_SESSION, HTTP_TIMEOUT,
     DATA_SOURCE, INTERVAL, SIGNAL_INTERVALS, TELEGRAM_DEDUP_WINDOW_SECONDS,
-    SCALP_RR_TARGET, ORDER_NOTIONAL_USDT, LEVERAGE, RR,
+    SCALP_RR_TARGET, MARGIN_STANDARD, MARGIN_HIGH_QUALITY, LEVERAGE, RR,
 )
 from utils import (
     format_price, format_vn_time, now_vn, calc_rr_from_levels,
@@ -142,6 +142,8 @@ def format_order_result_msg(signal, symbol, order_result, order_label=None, fill
         fallback_rr=signal.get("rr"), decimals=2
     )
     order_line = f"🆔 Mã lệnh  : <b>{order_label}</b>\n" if order_label else ""
+    # Xác định margin hiển thị (nếu có trong signal)
+    used_margin = signal.get("margin", MARGIN_STANDARD)
     return (
         "🟢 <b>DEMO - Đặt lệnh thị trường</b>\n\n"
         f"🏷️ Mã        : <b>{symbol}</b>\n"
@@ -151,9 +153,8 @@ def format_order_result_msg(signal, symbol, order_result, order_label=None, fill
         f"🛑 Cắt lỗ   : <b>{format_price(signal['sl'])}</b>\n"
         f"✅ Chốt lời : <b>{format_price(signal['tp'])}</b>\n"
         f"📊 R:R      : <b>{rr_text}</b>\n"
-        f"💵 Số dư VST: <b>{vst_balance_text}</b>\n"
-        f"🧾 Order ID : <b>{order_id}</b>\n"
-        f"📦 Notional : <b>{ORDER_NOTIONAL_USDT:.0f} USDT</b>\n"
+        f"💵 Ký quỹ   : <b>${used_margin:.1f}</b>\n"
+        f"📦 Notional : <b>$({used_margin * LEVERAGE:.0f})</b>\n"
         f"⚙️ Leverage  : <b>x{LEVERAGE}</b>\n"
         f"⏰ Thời gian : <b>{now_vn().strftime('%d/%m %H:%M')} (GMT+7)</b>"
     )
