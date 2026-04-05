@@ -73,11 +73,11 @@ SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "90"))
 
 # ===================== Breakeven =====================
 BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
-BE_OFFSET_PCT  = float(os.environ.get("BE_OFFSET_PCT", "0.02"))
+BE_OFFSET_PCT  = float(os.environ.get("BE_OFFSET_PCT", "0.05"))
 
 # ===================== Trailing Stop Loss =====================
-TSL_ENABLED        = os.environ.get("TSL_ENABLED", "false").lower() == "true"
-TSL_ACTIVATION_PCT = float(os.environ.get("TSL_ACTIVATION_PCT", "30.0"))  # % progress to TP to start trailing
+TSL_ENABLED        = os.environ.get("TSL_ENABLED", "true").lower() == "true"
+TSL_ACTIVATION_PCT = float(os.environ.get("TSL_ACTIVATION_PCT", "50.0"))  # % progress to TP to start trailing
 TSL_TRAIL_PCT      = float(os.environ.get("TSL_TRAIL_PCT", "0.15"))        # % trail distance from peak
 
 # ===================== Liquidity Windows =====================
