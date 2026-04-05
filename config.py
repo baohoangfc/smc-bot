@@ -31,7 +31,9 @@ VALID_INTERVALS     = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 
 # ===================== Trade Parameters =====================
 RR                  = float(os.environ.get("RR", "2.0"))
-ORDER_NOTIONAL_USDT = float(os.environ.get("ORDER_NOTIONAL_USDT", "2500"))
+MARGIN_STANDARD     = float(os.environ.get("MARGIN_STANDARD", "25.0"))
+MARGIN_HIGH_QUALITY = float(os.environ.get("MARGIN_HIGH_QUALITY", "50.0"))
+HIGH_QUALITY_THRESHOLD = float(os.environ.get("HIGH_QUALITY_THRESHOLD", "3.0"))
 LEVERAGE            = int(os.environ.get("LEVERAGE", "100"))
 MAX_ACTIVE_ORDERS   = int(os.environ.get("MAX_ACTIVE_ORDERS", "3"))
 MIN_TP_PCT          = float(os.environ.get("MIN_TP_PCT", "0.20"))

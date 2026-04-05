@@ -11,7 +11,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from config import (
     SYMBOLS, SIGNAL_INTERVALS, SCALP_INTERVALS, SWING_INTERVALS,
     GRID_BOT_ENABLED, GRID_INTERVAL, GRID_MIN_CANDLES,
-    INTERVAL, DATA_SOURCE, ORDER_NOTIONAL_USDT, RR, MIN_TP_PCT, MIN_SL_PCT,
+    INTERVAL, DATA_SOURCE, MARGIN_STANDARD, MARGIN_HIGH_QUALITY, HIGH_QUALITY_THRESHOLD,
+    LEVERAGE, RR, MIN_TP_PCT, MIN_SL_PCT,
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
 )
@@ -393,12 +394,16 @@ while True:
                     if effective_rr is not None:
                         order_signal["rr"] = effective_rr
 
-                    quantity = calc_order_quantity(last_price, ORDER_NOTIONAL_USDT)
+                    quality = order_signal.get("quality_score", 0)
+                    used_margin = MARGIN_HIGH_QUALITY if quality >= HIGH_QUALITY_THRESHOLD else MARGIN_STANDARD
+                    notional = used_margin * LEVERAGE
+                    
+                    quantity = calc_order_quantity(last_price, notional)
                     order = bing_client.place_market_order(
                         symbol, "BUY" if signal['side'] == 'LONG' else "SELL", signal['side'], quantity,
                         order_signal['tp'], order_signal['sl']
                     )
-                    print(f"[{symbol}] Order Result: {order}")
+                    print(f"[{symbol}] Order Result (Margin=${used_margin}, Qty={quantity}): {order}")
                     
                     if order and order.get("code") == 0:
                         last_skip_reason_by_symbol[symbol] = "Đã vào lệnh thành công."
@@ -418,6 +423,7 @@ while True:
                             "quantity": float(quantity),
                             "tp": exchange_pos.get("tp") if exchange_pos and exchange_pos.get("tp") is not None else order_signal.get("tp"),
                             "sl": exchange_pos.get("sl") if exchange_pos and exchange_pos.get("sl") is not None else order_signal.get("sl"),
+                            "margin": used_margin,
                             "opened_at": now_vn()
                         })
                         save_active_positions(active_positions_by_symbol)
@@ -496,15 +502,16 @@ while True:
                             last_tp_sl_sync_ts_by_symbol[symbol] = now_ts
 
                     label = pos.get("label", "")
+                    # Nếu có exchange_pos đồng bộ ở trên, calc_live_pnl sẽ ưu tiên dùng unrealizedProfit từ sàn
+                    current_pnl = calc_live_pnl(pos, float(live_price))
                     pnl_pct = calc_live_pnl_pct(pos, float(live_price))
                     prev_notified_pct = last_pnl_notified_pct_by_symbol[symbol].get(label)
                     if should_notify_pnl_change(prev_notified_pct, pnl_pct, threshold=10.0):
-                        n_pnl_pct = float(position_mgmt.calc_live_pnl(pos, float(live_price)) / max(1, position_mgmt.calc_position_notional_base(pos)) * 100.0) if 'position_mgmt' in globals() else 0.0
-                        # Workaround due to missing calc_position_notional_base direct import
+                        # PnL notifications now use direct exchange data
                         from position_mgmt import calc_position_notional_base
-                        n_pnl_pct = float(calc_live_pnl(pos, float(live_price)) / max(1, calc_position_notional_base(pos)) * 100.0)
+                        n_pnl_pct = (current_pnl / max(1, calc_position_notional_base(pos))) * 100.0
                         
-                        send_telegram(f"📌 <b>{symbol}</b>\n" + format_pnl_msg(pos, float(live_price), calc_live_pnl(pos, float(live_price)), pnl_pct, n_pnl_pct))
+                        send_telegram(format_pnl_msg(pos, float(live_price), current_pnl, pnl_pct, n_pnl_pct))
                         last_pnl_notified_pct_by_symbol[symbol][label] = pnl_pct
 
             maybe_flush_learning_state(learning_state, learning_meta)
