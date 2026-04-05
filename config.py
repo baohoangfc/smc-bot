@@ -77,6 +77,10 @@ SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "90"))
 BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
 BE_OFFSET_PCT  = float(os.environ.get("BE_OFFSET_PCT", "0.05"))
 
+# ===================== Partial Take Profit =====================
+PARTIAL_TP_ROI_THRESHOLD = float(os.environ.get("PARTIAL_TP_ROI_THRESHOLD", "100.0"))
+PARTIAL_TP_QUANTITY_FRACTION = float(os.environ.get("PARTIAL_TP_QUANTITY_FRACTION", "0.5"))
+
 # ===================== Trailing Stop Loss =====================
 TSL_ENABLED        = os.environ.get("TSL_ENABLED", "true").lower() == "true"
 TSL_ACTIVATION_PCT = float(os.environ.get("TSL_ACTIVATION_PCT", "50.0"))  # % progress to TP to start trailing

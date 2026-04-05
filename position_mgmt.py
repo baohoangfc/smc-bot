@@ -11,6 +11,7 @@ from config import (
     HIGH_QUALITY_COOLDOWN_FACTOR, LEVERAGE, MARGIN_STANDARD,
     BE_TRIGGER_PCT, BE_OFFSET_PCT,
     TSL_ENABLED, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT,
+    PARTIAL_TP_ROI_THRESHOLD, PARTIAL_TP_QUANTITY_FRACTION,
     INTERVAL,
 )
 from utils import calc_rr_from_levels, now_vn
@@ -213,6 +214,30 @@ def check_breakeven_condition(pos: dict, live_price: float, symbol: str = "") ->
 
 
 # ───────────────────────────────────────────
+# Partial Take Profit (Chốt lãi 50% tại 100% ROI)
+# ───────────────────────────────────────────
+
+def check_partial_take_profit(pos: dict, live_price: float, symbol: str = "") -> tuple:
+    """
+    Kiểm tra xem vị thế có đạt 100% ROI chưa.
+    Trả về (should_close_partial_bool, quantity_to_close)
+    """
+    if pos.get("partial_tp_done"):
+        return False, 0
+
+    from position_mgmt import calc_live_pnl_pct
+    roi = calc_live_pnl_pct(pos, live_price)
+    
+    if roi >= PARTIAL_TP_ROI_THRESHOLD:
+        qty = float(pos.get("quantity") or 0)
+        close_qty = round(qty * PARTIAL_TP_QUANTITY_FRACTION, 4)
+        if close_qty > 0:
+            return True, close_qty
+            
+    return False, 0
+
+
+# ───────────────────────────────────────────
 # Trailing Stop Loss
 # ───────────────────────────────────────────
 
@@ -240,8 +265,12 @@ def check_trailing_stop(pos: dict, live_price: float, symbol: str = "") -> dict:
         progress_pct = (lp - entry) / full_range * 100.0 if full_range > 0 else 0
         if progress_pct < TSL_ACTIVATION_PCT:
             return pos
-        # Trail SL theo peak: SL mới = live_price * (1 - TSL_TRAIL_PCT/100)
-        tsl_candidate = round(lp * (1 - TSL_TRAIL_PCT / 100.0), 2)
+            
+        # Thắt chặt Trailing Stop nếu đã chốt lời 50%
+        trail_pct = 0.08 if pos.get("partial_tp_done") else TSL_TRAIL_PCT
+        
+        # Trail SL theo peak: SL mới = live_price * (1 - trail_pct/100)
+        tsl_candidate = round(lp * (1 - trail_pct / 100.0), 2)
         if tsl_candidate > sl:
             pos = dict(pos)
             pos["sl"] = tsl_candidate
@@ -256,9 +285,10 @@ def check_trailing_stop(pos: dict, live_price: float, symbol: str = "") -> dict:
     else:
         full_range   = entry - tp
         progress_pct = (entry - lp) / full_range * 100.0 if full_range > 0 else 0
-        if progress_pct < TSL_ACTIVATION_PCT:
-            return pos
-        tsl_candidate = round(lp * (1 + TSL_TRAIL_PCT / 100.0), 2)
+        # Thắt chặt Trailing Stop nếu đã chốt lời 50%
+        trail_pct = 0.08 if pos.get("partial_tp_done") else TSL_TRAIL_PCT
+        
+        tsl_candidate = round(lp * (1 + trail_pct / 100.0), 2)
         if tsl_candidate < sl:
             pos = dict(pos)
             pos["sl"] = tsl_candidate
@@ -267,7 +297,7 @@ def check_trailing_stop(pos: dict, live_price: float, symbol: str = "") -> dict:
             send_telegram(
                 f"📡 <b>{symbol} - {pos.get('label')}: Trailing SL cập nhật</b>\n"
                 f"📉 Progress: {peak_pct}% → TP\n"
-                f"🛑 SL trail: <b>{tsl_candidate:.2f}</b> ({TSL_TRAIL_PCT:.2f}% từ giá hiện tại)\n"
+                f"🛑 SL trail: <b>{tsl_candidate:.2f}</b> ({trail_pct:.2f}% từ giá hiện tại)\n"
                 f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
             )
     return pos

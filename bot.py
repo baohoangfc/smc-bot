@@ -479,8 +479,30 @@ while True:
                 }
 
                 for pos in list(active_positions):
+                    # 1. Breakeven & Trailing Stop
                     pos = check_breakeven_condition(pos, float(live_price), symbol)
-                    pos = check_trailing_stop(pos, float(live_price), symbol) # TRẢI NGHIỆM TRAILING STOP
+                    pos = check_trailing_stop(pos, float(live_price), symbol) 
+                    
+                    # 2. Partial Take Profit (Chốt lãi 50% tại 100% ROI)
+                    from position_mgmt import check_partial_take_profit
+                    should_partial, close_qty = check_partial_take_profit(pos, float(live_price), symbol)
+                    if should_partial:
+                        print(f"[PARTIAL TP] {symbol} {pos.get('label')}: ROI >= 100% -> Chốt {close_qty}")
+                        close_res = bing_client.close_position_market(symbol, pos["side"], close_qty)
+                        if close_res and close_res.get("code") == 0:
+                            pos["partial_tp_done"] = True
+                            # Giảm quantity trong state để đồng bộ (hoặc đợi sync ở vòng lặp sau)
+                            pos["quantity"] = float(pos.get("quantity", 0)) - close_qty
+                            
+                            send_telegram(
+                                f"💰 <b>{symbol} - {pos.get('label')}: Đã chốt lãi 50%</b>\n"
+                                f"📈 ROI đạt ngưỡng 100% (Market Close)\n"
+                                f"💵 Khối lượng đóng: {close_qty}\n"
+                                f"🛡️ 50% còn lại đang được bảo vệ bởi Trailing Stop gắt gao (0.08%)\n"
+                                f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
+                            )
+                        else:
+                            print(f"[ERROR] Không thể chốt lãi partial cho {symbol}: {close_res}")
                     
                     for i, tracked in enumerate(active_positions_by_symbol[symbol]):
                         if tracked.get("label") == pos.get("label"):
