@@ -8,7 +8,7 @@ from config import (
     LIQUIDITY_WINDOWS_VN, LIQUIDITY_SOFT_MIN_RR, LIQUIDITY_SOFT_MIN_QUALITY,
     HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS, LOW_LIQUIDITY_MAX_ACTIVE_ORDERS,
     MIN_SIGNAL_QUALITY_SCORE, SIGNAL_COOLDOWN_SECONDS, HIGH_QUALITY_THRESHOLD,
-    HIGH_QUALITY_COOLDOWN_FACTOR, LEVERAGE, ORDER_NOTIONAL_USDT,
+    HIGH_QUALITY_COOLDOWN_FACTOR, LEVERAGE, MARGIN_STANDARD,
     BE_TRIGGER_PCT, BE_OFFSET_PCT,
     TSL_ENABLED, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT,
     INTERVAL,
@@ -115,7 +115,8 @@ def calc_position_notional_base(position: dict) -> float:
     entry = float(position.get("entry", 0) or 0)
     notional_entry     = abs(entry * qty)
     api_position_value = float(position.get("positionValue", 0) or 0)
-    return api_position_value if api_position_value > 0 else (notional_entry if notional_entry > 0 else ORDER_NOTIONAL_USDT)
+    # Nếu không có data từ sàn, fallback về MARGIN_STANDARD * LEVERAGE
+    return api_position_value if api_position_value > 0 else (notional_entry if notional_entry > 0 else (MARGIN_STANDARD * LEVERAGE))
 
 
 def calc_live_pnl_pct(position: dict, last_price: float) -> float:
