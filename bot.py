@@ -70,9 +70,15 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+    print(f"[SYSTEM] Khởi chạy Healthcheck Server tại Port {port}...")
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        print(f"[SYSTEM] Healthcheck Server đã sẵn sàng đáp ứng Railway!")
+        server.serve_forever()
+    except Exception as e:
+        print(f"[ERROR] Không thể khởi chạy Healthcheck Server: {e}")
 
+# Chạy server trong một luồng riêng ngay lập tức
 threading.Thread(target=run_health_server, daemon=True, name="HealthServer").start()
 
 
