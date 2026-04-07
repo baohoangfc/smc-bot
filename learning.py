@@ -46,16 +46,25 @@ def apply_learning_to_signal_v2(state, symbol, signal):
         return signal
 
     learned_signal = dict(signal)
+    trades = int(row.get("trades", 0))
+    wins = int(row.get("wins", 0))
     win_rate = float(row.get("win_rate", 0.0))
     avg_pnl  = float(row.get("avg_pnl", 0.0))
 
+    # Bayesian smoothing để giảm overfit khi số mẫu còn ít
+    prior_n = 8.0
+    bayes_win_rate = (wins + 0.5 * prior_n) / max(trades + prior_n, 1.0)
+    # Shrink avg_pnl về 0 khi ít lệnh
+    confidence = _clamp(trades / 40.0, 0.0, 1.0)
+    stable_avg_pnl = avg_pnl * confidence
+
     norm_base    = max(MARGIN_STANDARD * 0.5, 12.0) # 50% của Margin chuẩn $25 làm mốc chuẩn
-    norm_pnl     = avg_pnl / norm_base
-    quality_adjust = _clamp((win_rate - 0.5) * 0.8 + norm_pnl * 0.5, -0.6, 0.6)
+    norm_pnl     = stable_avg_pnl / norm_base
+    quality_adjust = _clamp((bayes_win_rate - 0.5) * 0.8 + norm_pnl * 0.5, -0.6, 0.6)
     learned_signal["quality_score"] = round(float(learned_signal.get("quality_score", 2.0)) + quality_adjust, 2)
 
     rr_base       = float(learned_signal.get("rr", RR) or RR)
-    rr_multiplier = _clamp(1.0 + (win_rate - 0.5) * 0.3, 0.9, 1.12)
+    rr_multiplier = _clamp(1.0 + (bayes_win_rate - 0.5) * 0.3, 0.9, 1.12)
     rr_target     = rr_base * rr_multiplier
     tp_new, sl_new, _ = align_tp_sl_with_rr(
         side,
@@ -68,7 +77,8 @@ def apply_learning_to_signal_v2(state, symbol, signal):
     learned_signal["sl"] = sl_new
     learned_signal["rr"] = rr_target
     learned_signal["learning_note"] = (
-        f"win_rate={win_rate:.2f}, avg_pnl={avg_pnl:+.2f}, norm_base={norm_base:.1f}, "
+        f"win_rate={win_rate:.2f}, bayes_wr={bayes_win_rate:.2f}, avg_pnl={avg_pnl:+.2f}, "
+        f"stable_avg_pnl={stable_avg_pnl:+.2f}, norm_base={norm_base:.1f}, "
         f"quality_adj={quality_adjust:+.2f}, rr_mul={rr_multiplier:.2f}"
     )
     print(f"[LEARN v2] Apply {key} | {learned_signal['learning_note']}")

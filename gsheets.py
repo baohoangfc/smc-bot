@@ -139,6 +139,9 @@ def export_trade_to_sheet(position: dict, pnl: float, close_price: float, symbol
         
         ws.append_row(row_data)
         print(f"[GSHEETS] Đã đồng bộ lệnh {label} ({symbol}) lên Google Sheet.")
+        appended_ok = append_trade_and_pnl_history_row(row_data)
+        if not appended_ok:
+            rebuild_trade_and_pnl_history()
         # Refresh sheet tổng hợp lợi nhuận ngay sau khi thêm lệnh đóng.
         update_profit_summary_sheet()
     except Exception as e:
@@ -182,6 +185,221 @@ def _compute_streaks(trades: list[dict]) -> tuple[int, int]:
             cur_win = 0
             cur_loss = 0
     return max_win, max_loss
+
+
+def append_trade_and_pnl_history_row(history_row: list):
+    """
+    Append 1 giao dịch mới vào Trade_History + PnL_History (nhanh hơn full rebuild).
+    Trả về False để caller fallback rebuild khi dữ liệu hiện tại bị lệch/thiếu.
+    """
+    sp = _get_spreadsheet()
+    if sp is None:
+        return False
+
+    trade_ws = _get_or_create_worksheet("Trade_History", rows="5000", cols="20")
+    pnl_ws = _get_or_create_worksheet("PnL_History", rows="5000", cols="12")
+    if trade_ws is None or pnl_ws is None:
+        return False
+
+    try:
+        trade_values = trade_ws.get_all_values()
+        pnl_values = pnl_ws.get_all_values()
+
+        trade_headers = [
+            "Trade #", "Time_Close", "Mã Lệnh", "Symbol", "Side", "Strategy", "Interval",
+            "Entry", "Close Price", "SL", "TP", "PnL", "ROI %", "Duration (Mins)",
+            "Result", "Quality Score", "SMC Mode", "Expected RR"
+        ]
+        pnl_headers = [
+            "Trade #", "Time_Close", "PnL", "Cumulative PnL", "Rolling Win Rate (%)",
+            "Wins", "Losses", "Breakeven"
+        ]
+
+        if not trade_values:
+            trade_ws.update([trade_headers], "A1")
+            trade_count = 0
+        else:
+            trade_count = max(len(trade_values) - 1, 0)
+
+        if not pnl_values:
+            pnl_ws.update([pnl_headers], "A1")
+            prev_cum_pnl = 0.0
+            wins = losses = be = 0
+            trade_count = 0
+        else:
+            last = pnl_values[-1]
+            # Nếu sheet đang chỉ có header
+            if len(pnl_values) == 1:
+                prev_cum_pnl = 0.0
+                wins = losses = be = 0
+                trade_count = 0
+            else:
+                prev_cum_pnl = _to_float(last[3] if len(last) > 3 else 0.0, 0.0)
+                wins = int(_to_float(last[5] if len(last) > 5 else 0.0, 0.0))
+                losses = int(_to_float(last[6] if len(last) > 6 else 0.0, 0.0))
+                be = int(_to_float(last[7] if len(last) > 7 else 0.0, 0.0))
+                trade_count = int(_to_float(last[0] if len(last) > 0 else 0.0, trade_count))
+
+        trade_no = trade_count + 1
+        pnl = _to_float(history_row[10], 0.0)
+        cumulative_pnl = prev_cum_pnl + pnl
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+        else:
+            be += 1
+        win_rate = (wins / trade_no) * 100.0
+
+        trade_ws.append_row([trade_no] + history_row)
+        pnl_ws.append_row([
+            trade_no,
+            history_row[0],
+            round(pnl, 6),
+            round(cumulative_pnl, 6),
+            round(win_rate, 4),
+            wins,
+            losses,
+            be,
+        ])
+        return True
+    except Exception as e:
+        print(f"[WARN] append_trade_and_pnl_history_row lỗi: {e}")
+        return False
+
+
+def rebuild_trade_and_pnl_history(history_sheet_name: str = "Sheet1",
+                                  trade_history_sheet_name: str = "Trade_History",
+                                  pnl_history_sheet_name: str = "PnL_History"):
+    """
+    Rebuild lịch sử giao dịch + lịch sử PnL lũy kế từ toàn bộ lệnh đã đóng (Sheet1).
+    Mục tiêu: khi bot restart hoặc dashboard lệch dữ liệu, có thể tính lại from scratch.
+    """
+    sp = _get_spreadsheet()
+    if sp is None:
+        return
+
+    try:
+        history_ws = sp.worksheet(history_sheet_name)
+    except Exception as e:
+        print(f"[GSHEETS] Không tìm thấy sheet lịch sử '{history_sheet_name}': {e}")
+        return
+
+    trade_ws = _get_or_create_worksheet(trade_history_sheet_name, rows="5000", cols="20")
+    pnl_ws = _get_or_create_worksheet(pnl_history_sheet_name, rows="5000", cols="12")
+    if trade_ws is None or pnl_ws is None:
+        return
+
+    try:
+        rows = history_ws.get_all_records()
+        if not rows:
+            trade_ws.clear()
+            pnl_ws.clear()
+            trade_ws.update([["Status"], ["Chưa có dữ liệu trong Sheet1"]], "A1")
+            pnl_ws.update([["Status"], ["Chưa có dữ liệu trong Sheet1"]], "A1")
+            return
+
+        trades = []
+        for idx, r in enumerate(rows, start=1):
+            pnl = _to_float(r.get("PnL"), 0.0)
+            close_time_raw = str(r.get("Time_Close", "") or "").strip()
+            dt = None
+            if close_time_raw:
+                try:
+                    dt = datetime.fromisoformat(close_time_raw)
+                except Exception:
+                    try:
+                        dt = datetime.strptime(close_time_raw, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        dt = None
+
+            trades.append({
+                "row_idx": idx,
+                "time_raw": close_time_raw,
+                "time": dt,
+                "label": r.get("Mã Lệnh", ""),
+                "symbol": r.get("Symbol", ""),
+                "side": r.get("Side", ""),
+                "strategy": r.get("Strategy", ""),
+                "interval": r.get("Interval", ""),
+                "entry": _to_float(r.get("Entry"), 0.0),
+                "close_price": _to_float(r.get("Close Price"), 0.0),
+                "sl": _to_float(r.get("SL"), 0.0),
+                "tp": _to_float(r.get("TP"), 0.0),
+                "pnl": pnl,
+                "roi_pct": _to_float(r.get("ROI %"), 0.0),
+                "duration_mins": _to_float(r.get("Duration (Mins)"), 0.0),
+                "result": str(r.get("Result", "") or ""),
+                "quality": r.get("Quality Score", ""),
+                "signal_mode": r.get("SMC Mode", ""),
+                "expected_rr": r.get("Expected RR", ""),
+            })
+
+        trades.sort(key=lambda x: (x["time"] is None, x["time"] or datetime.max, x["row_idx"]))
+
+        trade_rows = [[
+            "Trade #", "Time_Close", "Mã Lệnh", "Symbol", "Side", "Strategy", "Interval",
+            "Entry", "Close Price", "SL", "TP", "PnL", "ROI %", "Duration (Mins)",
+            "Result", "Quality Score", "SMC Mode", "Expected RR"
+        ]]
+        pnl_rows = [[
+            "Trade #", "Time_Close", "PnL", "Cumulative PnL", "Rolling Win Rate (%)",
+            "Wins", "Losses", "Breakeven"
+        ]]
+
+        cumulative_pnl = 0.0
+        wins = 0
+        losses = 0
+        be = 0
+        for i, t in enumerate(trades, start=1):
+            pnl = float(t["pnl"])
+            cumulative_pnl += pnl
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
+            else:
+                be += 1
+            win_rate = (wins / i) * 100.0
+
+            trade_rows.append([
+                i,
+                t["time_raw"],
+                t["label"],
+                t["symbol"],
+                t["side"],
+                t["strategy"],
+                t["interval"],
+                t["entry"],
+                t["close_price"],
+                t["sl"],
+                t["tp"],
+                round(pnl, 6),
+                f"{t['roi_pct']:.4f}%",
+                t["duration_mins"],
+                t["result"],
+                t["quality"],
+                t["signal_mode"],
+                t["expected_rr"],
+            ])
+            pnl_rows.append([
+                i,
+                t["time_raw"],
+                round(pnl, 6),
+                round(cumulative_pnl, 6),
+                round(win_rate, 4),
+                wins,
+                losses,
+                be,
+            ])
+
+        trade_ws.clear()
+        pnl_ws.clear()
+        trade_ws.update(trade_rows, "A1")
+        pnl_ws.update(pnl_rows, "A1")
+        print(f"[GSHEETS] Rebuilt Trade_History ({len(trades)} dòng) và PnL_History từ Sheet1.")
+    except Exception as e:
+        print(f"[WARN] rebuild_trade_and_pnl_history lỗi: {e}")
 
 
 def update_profit_summary_sheet(history_sheet_name: str = "Sheet1", summary_sheet_name: str = "Profit_Summary"):
