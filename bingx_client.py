@@ -190,6 +190,7 @@ class BingXClient:
                     "side": side,
                     "entry": entry,
                     "quantity": abs(qty),
+                    "positionId": self._extract_position_id(p),
                     "tp": tp,
                     "sl": sl,
                     "opened_at": now_vn(),
@@ -371,6 +372,16 @@ class BingXClient:
         except Exception:
             return None
 
+    def _extract_position_id(self, raw_position: dict):
+        """Lấy positionId theo nhiều key tương thích các version API."""
+        if not isinstance(raw_position, dict):
+            return None
+        for key in ("positionId", "positionID", "id"):
+            value = raw_position.get(key)
+            if value not in (None, "", 0, "0"):
+                return value
+        return None
+
     def place_order(self, symbol, side, pos_side, quantity, order_type="MARKET", price=None, tp=None, sl=None):
         path = "/openApi/swap/v2/trade/order"
 
@@ -426,6 +437,10 @@ class BingXClient:
                 "timestamp": int(time.time() * 1000),
                 "recvWindow": 5000
             }
+            position = self.get_open_position(symbol)
+            pos_id = (position or {}).get("positionId")
+            if pos_id not in (None, "", 0, "0"):
+                params["positionId"] = pos_id
             return self._signed_request("POST", "/openApi/swap/v2/trade/order", params, timeout=15)
         except Exception as e:
             print(f"[WARN] close_position_market exception: {e}")
@@ -444,6 +459,7 @@ class BingXClient:
                 return {"tp_added": False, "sl_added": False, "position": position}
 
             close_side = "SELL" if pos_side == "LONG" else "BUY"
+            pos_id = position.get("positionId")
             path = "/openApi/swap/v2/trade/order"
             result = {"tp_added": False, "sl_added": False, "position": position}
 
@@ -459,6 +475,8 @@ class BingXClient:
                     "timestamp": int(time.time() * 1000),
                     "recvWindow": 5000
                 }
+                if pos_id not in (None, "", 0, "0"):
+                    tp_params["positionId"] = pos_id
                 tp_resp = self._signed_request("POST", path, tp_params, timeout=10)
                 result["tp_added"] = self._extract_code(tp_resp) == 0
                 if not result["tp_added"]:
@@ -476,6 +494,8 @@ class BingXClient:
                     "timestamp": int(time.time() * 1000),
                     "recvWindow": 5000
                 }
+                if pos_id not in (None, "", 0, "0"):
+                    sl_params["positionId"] = pos_id
                 sl_resp = self._signed_request("POST", path, sl_params, timeout=10)
                 result["sl_added"] = self._extract_code(sl_resp) == 0
                 if not result["sl_added"]:

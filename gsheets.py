@@ -1,6 +1,7 @@
 import os
 import json
 from datetime import datetime
+from collections import defaultdict
 
 try:
     import gspread
@@ -138,8 +139,147 @@ def export_trade_to_sheet(position: dict, pnl: float, close_price: float, symbol
         
         ws.append_row(row_data)
         print(f"[GSHEETS] Đã đồng bộ lệnh {label} ({symbol}) lên Google Sheet.")
+        # Refresh sheet tổng hợp lợi nhuận ngay sau khi thêm lệnh đóng.
+        update_profit_summary_sheet()
     except Exception as e:
         print(f"[WARN] export_trade_to_sheet lỗi: {e}")
+
+
+def _to_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            cleaned = value.replace("%", "").replace(",", "").strip()
+            return float(cleaned) if cleaned else default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_profit_factor(gross_profit: float, gross_loss: float) -> float:
+    if gross_loss == 0:
+        return float("inf") if gross_profit > 0 else 0.0
+    return gross_profit / abs(gross_loss)
+
+
+def update_profit_summary_sheet(history_sheet_name: str = "Sheet1", summary_sheet_name: str = "Profit_Summary"):
+    """
+    Đọc lịch sử lệnh đóng từ Sheet1 và ghi thống kê lợi nhuận vào Profit_Summary.
+    Không cần file CSV local.
+    """
+    sp = _get_spreadsheet()
+    if sp is None:
+        return
+
+    try:
+        history_ws = sp.worksheet(history_sheet_name)
+    except Exception as e:
+        print(f"[GSHEETS] Không tìm thấy sheet lịch sử '{history_sheet_name}': {e}")
+        return
+
+    summary_ws = _get_or_create_worksheet(summary_sheet_name, rows="2000", cols="12")
+    if summary_ws is None:
+        return
+
+    try:
+        rows = history_ws.get_all_records()
+        if not rows:
+            summary_ws.clear()
+            summary_ws.update([
+                ["SMC BOT PROFIT SUMMARY", ""],
+                ["Status", "Chưa có dữ liệu lệnh đóng trong Sheet1"]
+            ], "A1")
+            return
+
+        trades = []
+        for r in rows:
+            pnl = _to_float(r.get("PnL"), 0.0)
+            time_raw = str(r.get("Time_Close", "") or "").strip()
+            dt = None
+            if time_raw:
+                try:
+                    dt = datetime.fromisoformat(time_raw)
+                except Exception:
+                    try:
+                        dt = datetime.strptime(time_raw, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        dt = None
+            trades.append({"pnl": pnl, "time": dt})
+
+        total_trades = len(trades)
+        wins = sum(1 for t in trades if t["pnl"] > 0)
+        losses = sum(1 for t in trades if t["pnl"] < 0)
+        breakeven = total_trades - wins - losses
+        gross_profit = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+        gross_loss = sum(t["pnl"] for t in trades if t["pnl"] < 0)
+        net_pnl = sum(t["pnl"] for t in trades)
+        avg_pnl = (net_pnl / total_trades) if total_trades else 0.0
+        win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
+        profit_factor = _safe_profit_factor(gross_profit, gross_loss)
+
+        equity = 0.0
+        peak = 0.0
+        max_drawdown = 0.0
+        for t in trades:
+            equity += t["pnl"]
+            peak = max(peak, equity)
+            dd = equity - peak
+            if dd < max_drawdown:
+                max_drawdown = dd
+
+        by_day = defaultdict(list)
+        by_week = defaultdict(list)
+        for t in trades:
+            if t["time"] is None:
+                continue
+            day_key = t["time"].date().isoformat()
+            iso = t["time"].isocalendar()
+            week_key = f"{iso.year}-W{iso.week:02d}"
+            by_day[day_key].append(t["pnl"])
+            by_week[week_key].append(t["pnl"])
+
+        def _aggregate(bucket: dict):
+            out = []
+            for k in sorted(bucket.keys()):
+                values = bucket[k]
+                n = len(values)
+                pnl_sum = sum(values)
+                out.append((k, n, pnl_sum, pnl_sum / n if n else 0.0))
+            return out
+
+        daily_rows = _aggregate(by_day)
+        weekly_rows = _aggregate(by_week)
+
+        pf_text = "inf" if profit_factor == float("inf") else f"{profit_factor:.4f}"
+        summary_rows = [
+            ["SMC BOT PROFIT SUMMARY", ""],
+            ["Last Updated", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")],
+            ["Total trades", total_trades],
+            ["Wins/Loss/BE", f"{wins}/{losses}/{breakeven}"],
+            ["Win rate (%)", round(win_rate, 4)],
+            ["Gross profit", round(gross_profit, 6)],
+            ["Gross loss", round(gross_loss, 6)],
+            ["Net PnL", round(net_pnl, 6)],
+            ["Avg PnL/trade", round(avg_pnl, 6)],
+            ["Profit factor", pf_text],
+            ["Max drawdown", round(max_drawdown, 6)],
+            [],
+            ["Daily summary", "", "", ""],
+            ["date", "trades", "net_pnl", "avg_pnl"],
+        ]
+        for d, n, pnl_sum, avg in daily_rows[-30:]:
+            summary_rows.append([d, n, round(pnl_sum, 6), round(avg, 6)])
+
+        summary_rows += [[], ["Weekly summary", "", "", ""], ["week", "trades", "net_pnl", "avg_pnl"]]
+        for w, n, pnl_sum, avg in weekly_rows[-16:]:
+            summary_rows.append([w, n, round(pnl_sum, 6), round(avg, 6)])
+
+        summary_ws.clear()
+        summary_ws.update(summary_rows, "A1")
+        print(f"[GSHEETS] Đã cập nhật sheet {summary_sheet_name} ({total_trades} trades).")
+    except Exception as e:
+        print(f"[WARN] update_profit_summary_sheet lỗi: {e}")
 
 def export_active_positions(active_positions_by_symbol: dict, latest_prices: dict):
     """
