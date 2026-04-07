@@ -17,10 +17,25 @@ BINGX_URL        = "https://open-api-vst.bingx.com"
 DATA_SOURCE      = "BINGX"
 
 # ===================== Symbols =====================
-SYMBOLS_RAW = os.environ.get("BINGX_SYMBOLS", "NCCOGOLD2USD-USDT,BTC-USDT")
-SYMBOLS     = [s.strip() for s in SYMBOLS_RAW.split(",") if s.strip()]
+def normalize_bingx_symbol(symbol: str) -> str:
+    """
+    Chuẩn hoá symbol về định dạng BingX perpetual phổ biến: BASE-QUOTE (vd: XAUT-USDT, BTC-USDT).
+    Nếu user nhập liền (vd: XAUTUSDT) thì tự chuyển thành XAUT-USDT để tránh nhầm lẫn.
+    """
+    s = (symbol or "").strip().upper()
+    if not s:
+        return s
+    if "-" in s:
+        return s
+    if s.endswith("USDT") and len(s) > 4:
+        return f"{s[:-4]}-USDT"
+    return s
+
+
+SYMBOLS_RAW = os.environ.get("BINGX_SYMBOLS", "XAUT-USDT,BTC-USDT")
+SYMBOLS     = [normalize_bingx_symbol(s) for s in SYMBOLS_RAW.split(",") if s.strip()]
 if not SYMBOLS:
-    SYMBOLS = [os.environ.get("BINGX_SYMBOL", "NCCOGOLD2USD-USDT")]
+    SYMBOLS = [normalize_bingx_symbol(os.environ.get("BINGX_SYMBOL", "XAUT-USDT"))]
 SYMBOL = SYMBOLS[0]
 
 # ===================== Timeframes =====================
