@@ -662,6 +662,167 @@ def export_active_positions(active_positions_by_symbol: dict, latest_prices: dic
     except Exception as e:
         print(f"[WARN] export_active_positions lỗi: {e}")
 
+
+def get_dashboard_payload(limit: int = 200) -> dict:
+    """
+    Trả dữ liệu để render web dashboard:
+    - trades: lịch sử lệnh đóng gần nhất
+    - pnl_curve: đường cong PnL lũy kế
+    - metrics: thống kê tổng quan
+    """
+    payload = {
+        "trades": [],
+        "pnl_curve": [],
+        "is_demo": False,
+        "metrics": {
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "breakeven": 0,
+            "win_rate": 0.0,
+            "net_pnl": 0.0,
+        },
+    }
+
+    sp = _get_spreadsheet()
+    if sp is None:
+        return payload
+
+    try:
+        trade_ws = sp.worksheet("Trade_History")
+    except Exception:
+        trade_ws = None
+
+    try:
+        pnl_ws = sp.worksheet("PnL_History")
+    except Exception:
+        pnl_ws = None
+
+    try:
+        if trade_ws is not None:
+            rows = trade_ws.get_all_records()
+            if rows:
+                recent_rows = rows[-max(limit, 1):]
+                for r in reversed(recent_rows):
+                    pnl = _to_float(r.get("PnL"), 0.0)
+                    if pnl > 0:
+                        result = "WIN"
+                    elif pnl < 0:
+                        result = "LOSS"
+                    else:
+                        result = "BREAKEVEN"
+                    payload["trades"].append({
+                        "time_close": str(r.get("Time_Close", "") or ""),
+                        "label": str(r.get("Mã Lệnh", "") or ""),
+                        "symbol": str(r.get("Symbol", "") or ""),
+                        "side": str(r.get("Side", "") or ""),
+                        "strategy": str(r.get("Strategy", "") or ""),
+                        "interval": str(r.get("Interval", "") or ""),
+                        "pnl": round(pnl, 6),
+                        "roi_pct": _to_float(r.get("ROI %"), 0.0),
+                        "result": result,
+                    })
+    except Exception as e:
+        print(f"[WARN] get_dashboard_payload/trade_rows lỗi: {e}")
+
+    try:
+        if pnl_ws is not None:
+            pnl_rows = pnl_ws.get_all_records()
+            if pnl_rows:
+                curve_rows = pnl_rows[-max(limit, 1):]
+                for r in curve_rows:
+                    payload["pnl_curve"].append({
+                        "trade_no": int(_to_float(r.get("Trade #"), 0)),
+                        "time_close": str(r.get("Time_Close", "") or ""),
+                        "pnl": round(_to_float(r.get("PnL"), 0.0), 6),
+                        "cumulative_pnl": round(_to_float(r.get("Cumulative PnL"), 0.0), 6),
+                    })
+
+                last = pnl_rows[-1]
+                total_trades = int(_to_float(last.get("Trade #"), 0))
+                wins = int(_to_float(last.get("Wins"), 0))
+                losses = int(_to_float(last.get("Losses"), 0))
+                be = int(_to_float(last.get("Breakeven"), 0))
+                net_pnl = _to_float(last.get("Cumulative PnL"), 0.0)
+                win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
+
+                payload["metrics"] = {
+                    "total_trades": total_trades,
+                    "wins": wins,
+                    "losses": losses,
+                    "breakeven": be,
+                    "win_rate": round(win_rate, 4),
+                    "net_pnl": round(net_pnl, 6),
+                }
+    except Exception as e:
+        print(f"[WARN] get_dashboard_payload/pnl_rows lỗi: {e}")
+
+    if payload["metrics"]["total_trades"] == 0 and payload["trades"]:
+        wins = sum(1 for t in payload["trades"] if t["pnl"] > 0)
+        losses = sum(1 for t in payload["trades"] if t["pnl"] < 0)
+        be = sum(1 for t in payload["trades"] if t["pnl"] == 0)
+        total = len(payload["trades"])
+        net_pnl = sum(t["pnl"] for t in payload["trades"])
+        payload["metrics"] = {
+            "total_trades": total,
+            "wins": wins,
+            "losses": losses,
+            "breakeven": be,
+            "win_rate": round((wins / total * 100.0) if total else 0.0, 4),
+            "net_pnl": round(net_pnl, 6),
+        }
+
+    return payload
+
+
+def get_demo_dashboard_payload() -> dict:
+    """
+    Dữ liệu mẫu để preview giao diện dashboard khi chưa có Google Sheets.
+    """
+    curve = []
+    pnl_samples = [8.2, -3.1, 5.7, 4.6, -2.4, 6.3, -1.0, 9.4, -4.2, 7.8]
+    cumulative = 0.0
+    for idx, pnl in enumerate(pnl_samples, start=1):
+        cumulative += pnl
+        curve.append({
+            "trade_no": idx,
+            "time_close": f"2026-04-{idx:02d} 20:00:00",
+            "pnl": pnl,
+            "cumulative_pnl": round(cumulative, 4),
+        })
+
+    trades = [
+        {
+            "time_close": f"2026-04-{i:02d} 20:00:00",
+            "label": f"LỆNH #{i}",
+            "symbol": "BTC-USDT",
+            "side": "LONG" if i % 2 else "SHORT",
+            "strategy": "scalp",
+            "interval": "15m",
+            "pnl": curve[i - 1]["pnl"],
+            "roi_pct": round(curve[i - 1]["pnl"] * 0.8, 2),
+            "result": "WIN" if curve[i - 1]["pnl"] > 0 else "LOSS",
+        }
+        for i in range(10, 0, -1)
+    ]
+
+    wins = sum(1 for x in pnl_samples if x > 0)
+    losses = sum(1 for x in pnl_samples if x < 0)
+    total = len(pnl_samples)
+    return {
+        "trades": trades,
+        "pnl_curve": curve,
+        "is_demo": True,
+        "metrics": {
+            "total_trades": total,
+            "wins": wins,
+            "losses": losses,
+            "breakeven": total - wins - losses,
+            "win_rate": round((wins / total) * 100.0, 2),
+            "net_pnl": round(sum(pnl_samples), 4),
+        },
+    }
+
 def setup_dashboard():
     """
     Tạo hoặc đảm bảo Sheet Dashboard tồn tại với bố cục đẹp hơn và có biểu đồ trực quan.
