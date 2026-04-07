@@ -1,0 +1,14 @@
+{% extends 'base_readonly.html' %}
+{% block content %}
+<div class="card"><div class="label">Data source</div><div class="value">{{ system.data_source }}</div></div>
+<div class="card"><div class="label">Google Sheets</div><div class="value">{{ 'Connected' if system.sheet_connected else 'Disconnected' }}</div></div>
+<div class="card"><div class="label">Last trade time</div><div class="value">{{ system.last_trade_time or 'N/A' }}</div></div>
+<div class="card"><div class="label">Last running update</div><div class="value">{{ system.last_running_update or 'N/A' }}</div></div>
+<div class="table-card">
+  <h3>Errors</h3>
+  <ul>
+    {% if not system.errors %}<li class="green">Không có lỗi nguồn dữ liệu.</li>{% endif %}
+    {% for e in system.errors %}<li class="red">{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% endblock %}

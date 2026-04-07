@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ title or 'SMC Bot Read-only' }}</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #0b1220; color: #e7edf7; }
+    .wrap { max-width: 1180px; margin: 24px auto; padding: 0 16px; }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+    .nav a { color:#cde0ff; text-decoration:none; border:1px solid #28406a; padding:8px 10px; border-radius:8px; }
+    .nav a.active { background:#1a2d52; }
+    .card, .table-card { background:#121b2f; border:1px solid #233353; border-radius:10px; padding:12px; margin-bottom:14px; }
+    .cards { display:grid; grid-template-columns: repeat(4,minmax(140px,1fr)); gap:10px; }
+    .label { opacity:.8; font-size:12px; margin-bottom:4px; }
+    .value { font-size:20px; font-weight:700; }
+    .green { color:#37d67a; }
+    .red { color:#ff6b6b; }
+    .gray { color:#9aa7bf; }
+    table { width:100%; border-collapse: collapse; font-size:13px; }
+    th, td { border-bottom:1px solid #1e2b47; padding:8px 6px; text-align:left; }
+    .scroll { max-height:420px; overflow:auto; }
+    @media (max-width:900px) { .cards { grid-template-columns: repeat(2,minmax(140px,1fr)); } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>{{ heading }}</h2>
+    <div class="nav">
+      <a href="/dashboard" class="{% if active == 'overview' %}active{% endif %}">Overview</a>
+      <a href="/dashboard/history" class="{% if active == 'history' %}active{% endif %}">Trade History</a>
+      <a href="/dashboard/running" class="{% if active == 'running' %}active{% endif %}">Running Positions</a>
+      <a href="/dashboard/analytics" class="{% if active == 'analytics' %}active{% endif %}">Analytics</a>
+      <a href="/dashboard/system" class="{% if active == 'system' %}active{% endif %}">System</a>
+    </div>
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

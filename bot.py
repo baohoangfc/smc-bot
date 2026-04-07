@@ -72,7 +72,13 @@ def dashboard_page():
     from gsheets import get_dashboard_payload, get_demo_dashboard_payload
     use_demo = str(request.args.get("demo", "0")).lower() in {"1", "true", "yes"}
     data = get_demo_dashboard_payload() if use_demo else get_dashboard_payload(limit=300)
-    return render_template("dashboard.html", dashboard=data)
+    return render_template(
+        "dashboard.html",
+        dashboard=data,
+        title="SMC Bot - Overview",
+        heading="SMC Bot Read-only Dashboard",
+        active="overview",
+    )
 
 
 @app.route("/api/dashboard")
@@ -81,6 +87,58 @@ def dashboard_api():
     use_demo = str(request.args.get("demo", "0")).lower() in {"1", "true", "yes"}
     data = get_demo_dashboard_payload() if use_demo else get_dashboard_payload(limit=300)
     return jsonify(data)
+
+
+@app.route("/dashboard/history")
+def dashboard_history_page():
+    from gsheets import get_readonly_site_payload
+    site = get_readonly_site_payload(limit=300)
+    return render_template(
+        "history.html",
+        trade_history=site.get("trade_history", []),
+        title="SMC Bot - Trade History",
+        heading="Trade History (Read-only)",
+        active="history",
+    )
+
+
+@app.route("/dashboard/running")
+def dashboard_running_page():
+    from gsheets import get_readonly_site_payload
+    site = get_readonly_site_payload(limit=300)
+    return render_template(
+        "running.html",
+        running_positions=site.get("running_positions", []),
+        title="SMC Bot - Running Positions",
+        heading="Running Positions (Read-only)",
+        active="running",
+    )
+
+
+@app.route("/dashboard/analytics")
+def dashboard_analytics_page():
+    from gsheets import get_readonly_site_payload
+    site = get_readonly_site_payload(limit=300)
+    return render_template(
+        "analytics.html",
+        analytics=site.get("analytics", {}),
+        title="SMC Bot - Analytics",
+        heading="Performance Analytics (Read-only)",
+        active="analytics",
+    )
+
+
+@app.route("/dashboard/system")
+def dashboard_system_page():
+    from gsheets import get_readonly_site_payload
+    site = get_readonly_site_payload(limit=300)
+    return render_template(
+        "system.html",
+        system=site.get("system", {}),
+        title="SMC Bot - System Health",
+        heading="System & Data Health (Read-only)",
+        active="system",
+    )
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
