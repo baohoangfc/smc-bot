@@ -163,6 +163,27 @@ def _safe_profit_factor(gross_profit: float, gross_loss: float) -> float:
     return gross_profit / abs(gross_loss)
 
 
+def _compute_streaks(trades: list[dict]) -> tuple[int, int]:
+    max_win = 0
+    max_loss = 0
+    cur_win = 0
+    cur_loss = 0
+    for t in trades:
+        pnl = t.get("pnl", 0.0)
+        if pnl > 0:
+            cur_win += 1
+            cur_loss = 0
+            max_win = max(max_win, cur_win)
+        elif pnl < 0:
+            cur_loss += 1
+            cur_win = 0
+            max_loss = max(max_loss, cur_loss)
+        else:
+            cur_win = 0
+            cur_loss = 0
+    return max_win, max_loss
+
+
 def update_profit_summary_sheet(history_sheet_name: str = "Sheet1", summary_sheet_name: str = "Profit_Summary"):
     """
     Đọc lịch sử lệnh đóng từ Sheet1 và ghi thống kê lợi nhuận vào Profit_Summary.
@@ -215,8 +236,15 @@ def update_profit_summary_sheet(history_sheet_name: str = "Sheet1", summary_shee
         gross_loss = sum(t["pnl"] for t in trades if t["pnl"] < 0)
         net_pnl = sum(t["pnl"] for t in trades)
         avg_pnl = (net_pnl / total_trades) if total_trades else 0.0
+        avg_win = (gross_profit / wins) if wins else 0.0
+        avg_loss = (gross_loss / losses) if losses else 0.0
+        payoff_ratio = (avg_win / abs(avg_loss)) if avg_loss < 0 else 0.0
+        expectancy = avg_pnl
         win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
         profit_factor = _safe_profit_factor(gross_profit, gross_loss)
+        best_trade = max((t["pnl"] for t in trades), default=0.0)
+        worst_trade = min((t["pnl"] for t in trades), default=0.0)
+        max_win_streak, max_loss_streak = _compute_streaks(trades)
 
         equity = 0.0
         peak = 0.0
@@ -245,7 +273,8 @@ def update_profit_summary_sheet(history_sheet_name: str = "Sheet1", summary_shee
                 values = bucket[k]
                 n = len(values)
                 pnl_sum = sum(values)
-                out.append((k, n, pnl_sum, pnl_sum / n if n else 0.0))
+                win_cnt = sum(1 for v in values if v > 0)
+                out.append((k, n, pnl_sum, pnl_sum / n if n else 0.0, (win_cnt / n * 100.0) if n else 0.0))
             return out
 
         daily_rows = _aggregate(by_day)
@@ -262,21 +291,110 @@ def update_profit_summary_sheet(history_sheet_name: str = "Sheet1", summary_shee
             ["Gross loss", round(gross_loss, 6)],
             ["Net PnL", round(net_pnl, 6)],
             ["Avg PnL/trade", round(avg_pnl, 6)],
+            ["Avg WIN", round(avg_win, 6)],
+            ["Avg LOSS", round(avg_loss, 6)],
+            ["Payoff ratio", round(payoff_ratio, 4)],
+            ["Expectancy", round(expectancy, 6)],
             ["Profit factor", pf_text],
+            ["Best trade", round(best_trade, 6)],
+            ["Worst trade", round(worst_trade, 6)],
             ["Max drawdown", round(max_drawdown, 6)],
+            ["Max win streak", max_win_streak],
+            ["Max loss streak", max_loss_streak],
             [],
-            ["Daily summary", "", "", ""],
-            ["date", "trades", "net_pnl", "avg_pnl"],
+            ["Daily summary (30 ngày gần nhất)", "", "", "", ""],
+            ["date", "trades", "net_pnl", "avg_pnl", "win_rate_%"],
         ]
-        for d, n, pnl_sum, avg in daily_rows[-30:]:
-            summary_rows.append([d, n, round(pnl_sum, 6), round(avg, 6)])
+        for d, n, pnl_sum, avg, wr in daily_rows[-30:]:
+            summary_rows.append([d, n, round(pnl_sum, 6), round(avg, 6), round(wr, 3)])
 
-        summary_rows += [[], ["Weekly summary", "", "", ""], ["week", "trades", "net_pnl", "avg_pnl"]]
-        for w, n, pnl_sum, avg in weekly_rows[-16:]:
-            summary_rows.append([w, n, round(pnl_sum, 6), round(avg, 6)])
+        summary_rows += [[], ["Weekly summary (16 tuần gần nhất)", "", "", "", ""], ["week", "trades", "net_pnl", "avg_pnl", "win_rate_%"]]
+        for w, n, pnl_sum, avg, wr in weekly_rows[-16:]:
+            summary_rows.append([w, n, round(pnl_sum, 6), round(avg, 6), round(wr, 3)])
 
         summary_ws.clear()
         summary_ws.update(summary_rows, "A1")
+
+        daily_header_idx = 20
+        daily_start_idx = daily_header_idx + 1
+        daily_end_idx = daily_start_idx + len(daily_rows[-30:])
+        weekly_header_idx = daily_end_idx + 1
+        weekly_start_idx = weekly_header_idx + 1
+        weekly_end_idx = weekly_start_idx + len(weekly_rows[-16:])
+
+        fmt_requests = [
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": summary_ws.id,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 5,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {"red": 0.13, "green": 0.42, "blue": 0.30},
+                            "textFormat": {
+                                "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                                "bold": True,
+                                "fontSize": 12,
+                            },
+                            "horizontalAlignment": "CENTER",
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": summary_ws.id,
+                        "startRowIndex": 20,
+                        "endRowIndex": 22,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 5,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {"red": 0.93, "green": 0.95, "blue": 1.0},
+                            "textFormat": {"bold": True},
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": summary_ws.id,
+                        "startRowIndex": weekly_header_idx,
+                        "endRowIndex": weekly_header_idx + 2,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 5,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": {"red": 0.96, "green": 0.94, "blue": 0.88},
+                            "textFormat": {"bold": True},
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            },
+            {
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId": summary_ws.id,
+                        "dimension": "COLUMNS",
+                        "startIndex": 0,
+                        "endIndex": 5,
+                    }
+                }
+            },
+        ]
+        sp.batch_update({"requests": fmt_requests})
+
         print(f"[GSHEETS] Đã cập nhật sheet {summary_sheet_name} ({total_trades} trades).")
     except Exception as e:
         print(f"[WARN] update_profit_summary_sheet lỗi: {e}")
@@ -328,98 +446,235 @@ def export_active_positions(active_positions_by_symbol: dict, latest_prices: dic
 
 def setup_dashboard():
     """
-    Tạo hoặc đẩm bảo Sheet Dashboard tồn tại với các công thức tính toán.
+    Tạo hoặc đảm bảo Sheet Dashboard tồn tại với bố cục đẹp hơn và có biểu đồ trực quan.
     """
-    ws = _get_or_create_worksheet("Dashboard")
+    ws = _get_or_create_worksheet("Dashboard", rows="180", cols="10")
     if ws is None:
         return
-        
+
     try:
-        if len(ws.col_values(1)) > 0:
-            return # Đã setup
-            
         data = [
-            ["BẢNG THỐNG KÊ GIAO DỊCH (DASHBOARD)", ""],
-            ["", ""],
-            ["Tổng số lệnh:", '=COUNTA(Sheet1!B2:B)'],
-            ["Số lệnh WIN:", '=COUNTIF(Sheet1!N2:N, "WIN")'],
-            ["Số lệnh LOSS:", '=COUNTIF(Sheet1!N2:N, "LOSS")'],
-            ["Winrate (%):", '=IF(B3=0, 0, B4/B3)'], # Format cột B6 thành % trong sheet bằng tay
-            ["", ""],
-            ["Tổng Lợi Nhuận (PnL):", '=SUM(Sheet1!K2:K)'],
-            ["Ghi chú:", "Để lấy dữ liệu update, xem sheet Lịch Sử (Sheet1)"]
+            ["📈 SMC BOT DASHBOARD", "", "", "", "", "", "", "", "", ""],
+            ["Last Sync", '=IFERROR(TEXT(MAX(Sheet1!A2:A),"yyyy-mm-dd hh:mm:ss"), "N/A")', "", "Timezone", "UTC", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", ""],
+            ["📊 Tổng quan", "Giá trị", "", "⚡ Hiệu suất", "Giá trị", "", "🛡️ Rủi ro", "Giá trị", "", ""],
+            ["Tổng lệnh", '=COUNTA(Sheet1!B2:B)', "", "Win rate", '=IF(B5=0,0,COUNTIF(Sheet1!N2:N,"WIN")/B5)', "", "Profit factor", '=IF(ABS(SUMIF(Sheet1!K2:K,"<0"))=0,"inf",SUMIF(Sheet1!K2:K,">0")/ABS(SUMIF(Sheet1!K2:K,"<0")))', "", ""],
+            ["WIN", '=COUNTIF(Sheet1!N2:N,"WIN")', "", "Avg PnL", '=IF(B5=0,0,SUM(Sheet1!K2:K)/B5)', "", "Max DD", '=IFERROR(MIN(ArrayFormula(SUMIF(ROW(Sheet1!K2:K),"<="&ROW(Sheet1!K2:K),Sheet1!K2:K)-MAX(FILTER(ArrayFormula(SUMIF(ROW(Sheet1!K2:K),"<="&ROW(Sheet1!K2:K),Sheet1!K2:K)),ROW(Sheet1!K2:K)<=ROW(Sheet1!K2:K)))),0)', "", ""],
+            ["LOSS", '=COUNTIF(Sheet1!N2:N,"LOSS")', "", "Avg WIN", '=IF(B6=0,0,SUMIF(Sheet1!K2:K,">0")/B6)', "", "Best trade", '=IFERROR(MAX(Sheet1!K2:K),0)', "", ""],
+            ["BREAKEVEN", '=COUNTIF(Sheet1!N2:N,"BREAKEVEN")', "", "Avg LOSS", '=IF(B7=0,0,SUMIF(Sheet1!K2:K,"<0")/B7)', "", "Worst trade", '=IFERROR(MIN(Sheet1!K2:K),0)', "", ""],
+            ["Net PnL", '=SUM(Sheet1!K2:K)', "", "Payoff ratio", '=IF(ABS(E8)=0,0,E7/ABS(E8))', "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", ""],
+            ["📅 Daily PnL (30 ngày)", "PnL", "", "📅 Weekly PnL (16 tuần)", "PnL", "", "", "", "", ""],
+            [
+                '=IFERROR(TEXT(INDEX(SORT(UNIQUE(FILTER(INT(Sheet1!A2:A),Sheet1!A2:A<>"")),1,FALSE),SEQUENCE(30,1,1,1)),"yyyy-mm-dd"),"")',
+                '=IF(A12="","",SUMIFS(Sheet1!K:K,Sheet1!A:A,">="&A12,Sheet1!A:A,"<"&A12+1))',
+                "",
+                '=IFERROR(INDEX(SORT(UNIQUE(FILTER(TEXT(Sheet1!A2:A,"yyyy")&"-W"&TEXT(ISOWEEKNUM(Sheet1!A2:A),"00"),Sheet1!A2:A<>"")),1,FALSE),SEQUENCE(16,1,1,1)),"")',
+                '=IF(D12="", "", SUM(FILTER(Sheet1!K2:K, TEXT(Sheet1!A2:A,"yyyy")&"-W"&TEXT(ISOWEEKNUM(Sheet1!A2:A),"00")=D12)))',
+                "",
+                "",
+                "",
+                "",
+                "",
+            ],
         ]
-        
+
+        ws.clear()
         ws.update(data, 'A1')
-        print("[GSHEETS] Đã điền công thức Dashboard.")
-        
-        # Tạo biểu đồ
+
+        sp = _get_spreadsheet()
+        if sp is None:
+            return
+
+        history_id = None
         try:
-            sp = _get_spreadsheet()
-            dashboard_id = ws.id
+            history_id = sp.sheet1.id
+        except Exception:
             history_id = None
-            try:
-                history_id = sp.sheet1.id
-            except:
-                pass
-                
-            requests = []
-            
-            # Biểu đồ tròn: Win/Loss Ratio
-            requests.append({
+
+        # Xóa chart cũ để tránh nhân bản mỗi lần refresh dashboard
+        try:
+            metadata = sp.fetch_sheet_metadata()
+            embedded_objects = metadata.get("sheets", [{}])[0].get("charts", [])
+            # fallback cho schema phổ biến: top-level embeddedObjects
+            if not embedded_objects:
+                embedded_objects = metadata.get("embeddedObjects", [])
+            delete_requests = []
+            for obj in embedded_objects:
+                obj_id = obj.get("chartId") or obj.get("objectId")
+                if obj_id is not None:
+                    delete_requests.append({"deleteEmbeddedObject": {"objectId": obj_id}})
+            if delete_requests:
+                sp.batch_update({"requests": delete_requests})
+        except Exception:
+            pass
+
+        fmt_requests = [
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": ws.id, "gridProperties": {"frozenRowCount": 4}},
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+            {
+                "mergeCells": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 10},
+                    "mergeType": "MERGE_ALL",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 10},
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.07, "green": 0.2, "blue": 0.37}, "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True, "fontSize": 16}, "horizontalAlignment": "CENTER"}},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 3, "endRowIndex": 4, "startColumnIndex": 0, "endColumnIndex": 8},
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.87, "green": 0.93, "blue": 1}, "textFormat": {"bold": True}, "horizontalAlignment": "CENTER"}},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 4, "endRowIndex": 9, "startColumnIndex": 0, "endColumnIndex": 8},
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.98, "green": 0.99, "blue": 1.0}}},
+                    "fields": "userEnteredFormat(backgroundColor)",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 10, "endRowIndex": 11, "startColumnIndex": 0, "endColumnIndex": 8},
+                    "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.91, "green": 0.97, "blue": 0.9}, "textFormat": {"bold": True}}},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 4, "endRowIndex": 9, "startColumnIndex": 4, "endColumnIndex": 5},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 4, "endRowIndex": 9, "startColumnIndex": 1, "endColumnIndex": 2},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0000"}}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 11, "endRowIndex": 42, "startColumnIndex": 1, "endColumnIndex": 2},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0000"}}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": 11, "endRowIndex": 28, "startColumnIndex": 4, "endColumnIndex": 5},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0000"}}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            },
+            {
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [{"sheetId": ws.id, "startRowIndex": 11, "endRowIndex": 42, "startColumnIndex": 1, "endColumnIndex": 2}],
+                        "booleanRule": {
+                            "condition": {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": "0"}]},
+                            "format": {"textFormat": {"foregroundColor": {"red": 0.1, "green": 0.5, "blue": 0.2}, "bold": True}},
+                        },
+                    },
+                    "index": 0,
+                }
+            },
+            {
+                "addConditionalFormatRule": {
+                    "rule": {
+                        "ranges": [{"sheetId": ws.id, "startRowIndex": 11, "endRowIndex": 42, "startColumnIndex": 1, "endColumnIndex": 2}],
+                        "booleanRule": {
+                            "condition": {"type": "NUMBER_LESS", "values": [{"userEnteredValue": "0"}]},
+                            "format": {"textFormat": {"foregroundColor": {"red": 0.72, "green": 0.11, "blue": 0.11}, "bold": True}},
+                        },
+                    },
+                    "index": 0,
+                }
+            },
+            {
+                "autoResizeDimensions": {
+                    "dimensions": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 10}
+                }
+            },
+        ]
+
+        sp.batch_update({"requests": fmt_requests})
+
+        chart_requests = [
+            {
                 "addChart": {
                     "chart": {
                         "spec": {
-                            "title": "Tỉ Lệ Thắng/Thua",
+                            "title": "Tỷ lệ WIN/LOSS/BE",
                             "pieChart": {
                                 "legendPosition": "RIGHT_LEGEND",
-                                "domain": {"sourceRange": {"sources": [{"sheetId": dashboard_id, "startRowIndex": 3, "endRowIndex": 5, "startColumnIndex": 0, "endColumnIndex": 1}]}},
-                                "series": {"sourceRange": {"sources": [{"sheetId": dashboard_id, "startRowIndex": 3, "endRowIndex": 5, "startColumnIndex": 1, "endColumnIndex": 2}]}}
+                                "domain": {"sourceRange": {"sources": [{"sheetId": ws.id, "startRowIndex": 5, "endRowIndex": 8, "startColumnIndex": 0, "endColumnIndex": 1}]}},
+                                "series": {"sourceRange": {"sources": [{"sheetId": ws.id, "startRowIndex": 5, "endRowIndex": 8, "startColumnIndex": 1, "endColumnIndex": 2}]}}
                             }
                         },
-                        "position": {
-                            "overlayPosition": {
-                                "anchorCell": {"sheetId": dashboard_id, "rowIndex": 1, "columnIndex": 3},
-                                "widthPixels": 400, "heightPixels": 280
-                            }
-                        }
+                        "position": {"overlayPosition": {"anchorCell": {"sheetId": ws.id, "rowIndex": 2, "columnIndex": 8}, "widthPixels": 440, "heightPixels": 280}}
                     }
                 }
-            })
-            
-            # Biểu đồ cột: PnL theo lệnh
-            if history_id is not None:
-                requests.append({
+            },
+            {
+                "addChart": {
+                    "chart": {
+                        "spec": {
+                            "title": "Daily PnL (30 ngày)",
+                            "basicChart": {
+                                "chartType": "COLUMN",
+                                "legendPosition": "NO_LEGEND",
+                                "axis": [
+                                    {"position": "BOTTOM_AXIS", "title": "Date"},
+                                    {"position": "LEFT_AXIS", "title": "PnL"}
+                                ],
+                                "domains": [{"domain": {"sourceRange": {"sources": [{"sheetId": ws.id, "startRowIndex": 11, "endRowIndex": 42, "startColumnIndex": 0, "endColumnIndex": 1}]}}}],
+                                "series": [{"series": {"sourceRange": {"sources": [{"sheetId": ws.id, "startRowIndex": 11, "endRowIndex": 42, "startColumnIndex": 1, "endColumnIndex": 2}]}}}],
+                            }
+                        },
+                        "position": {"overlayPosition": {"anchorCell": {"sheetId": ws.id, "rowIndex": 12, "columnIndex": 6}, "widthPixels": 620, "heightPixels": 320}}
+                    }
+                }
+            },
+        ]
+
+        if history_id is not None:
+            chart_requests.append(
+                {
                     "addChart": {
                         "chart": {
                             "spec": {
-                                "title": "Hiệu Suất Lợi Nhuận (PnL History)",
+                                "title": "Lịch sử PnL theo lệnh",
                                 "basicChart": {
-                                    "chartType": "COLUMN",
-                                    "legendPosition": "BOTTOM_LEGEND",
+                                    "chartType": "LINE",
+                                    "legendPosition": "NO_LEGEND",
                                     "axis": [
-                                        {"position": "BOTTOM_AXIS", "title": "Các Khớp Lệnh"},
-                                        {"position": "LEFT_AXIS", "title": "USDT"}
+                                        {"position": "BOTTOM_AXIS", "title": "Trade Index"},
+                                        {"position": "LEFT_AXIS", "title": "PnL"}
                                     ],
                                     "series": [{
                                         "series": {"sourceRange": {"sources": [{"sheetId": history_id, "startRowIndex": 1, "startColumnIndex": 10, "endColumnIndex": 11}]}}
-                                    }]
+                                    }],
                                 }
                             },
-                            "position": {
-                                "overlayPosition": {
-                                    "anchorCell": {"sheetId": dashboard_id, "rowIndex": 11, "columnIndex": 0},
-                                    "widthPixels": 600, "heightPixels": 350
-                                }
-                            }
+                            "position": {"overlayPosition": {"anchorCell": {"sheetId": ws.id, "rowIndex": 30, "columnIndex": 6}, "widthPixels": 620, "heightPixels": 320}}
                         }
                     }
-                })
-                
-            sp.batch_update({"requests": requests})
-            print("[GSHEETS] Tạo biểu đồ Dashboard thành công.")
-        except Exception as e:
-            print(f"[WARN] Lỗi vẽ biểu đồ Dashboard: {e}")
-            
+                }
+            )
+
+        sp.batch_update({"requests": chart_requests})
+        print("[GSHEETS] Đã setup Dashboard đẹp hơn và thêm biểu đồ trực quan.")
     except Exception as e:
         print(f"[WARN] setup_dashboard lỗi: {e}")
