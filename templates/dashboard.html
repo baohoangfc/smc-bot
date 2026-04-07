@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SMC Bot Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #0b1220; color: #e7edf7; }
+    .wrap { max-width: 1180px; margin: 24px auto; padding: 0 16px; }
+    .title { margin-bottom: 16px; }
+    .cards { display: grid; grid-template-columns: repeat(5, minmax(140px,1fr)); gap: 12px; margin-bottom: 16px; }
+    .card { background: #121b2f; border: 1px solid #233353; border-radius: 10px; padding: 12px; }
+    .label { opacity: .8; font-size: 12px; margin-bottom: 6px; }
+    .value { font-size: 20px; font-weight: 700; }
+    .chart-card, .table-card { background: #121b2f; border: 1px solid #233353; border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #1e2b47; padding: 8px 6px; text-align: left; }
+    th { color: #95a9d1; position: sticky; top: 0; background: #121b2f; }
+    .green { color: #37d67a; }
+    .red { color: #ff6b6b; }
+    .gray { color: #9aa7bf; }
+    .scroll { max-height: 420px; overflow: auto; }
+    @media (max-width: 900px) { .cards { grid-template-columns: repeat(2,minmax(140px,1fr)); } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2 class="title">📊 SMC Bot - Lịch sử giao dịch & PnL {% if dashboard.is_demo %}<span class="gray">(DEMO)</span>{% endif %}</h2>
+    <p class="gray" style="margin-top:-4px;margin-bottom:14px;">
+      {% if dashboard.is_demo %}
+      Đang hiển thị dữ liệu mẫu để bạn xem giao diện. Dùng <b>/dashboard</b> để xem dữ liệu thật.
+      {% else %}
+      Nếu chưa có dữ liệu, bạn có thể xem thử giao diện bằng <b>/dashboard?demo=1</b>.
+      {% endif %}
+    </p>
+
+    <div class="cards">
+      <div class="card"><div class="label">Tổng lệnh</div><div class="value">{{ dashboard.metrics.total_trades }}</div></div>
+      <div class="card"><div class="label">Win / Loss / BE</div><div class="value">{{ dashboard.metrics.wins }} / {{ dashboard.metrics.losses }} / {{ dashboard.metrics.breakeven }}</div></div>
+      <div class="card"><div class="label">Win rate</div><div class="value">{{ dashboard.metrics.win_rate }}%</div></div>
+      <div class="card"><div class="label">Net PnL</div><div class="value {% if dashboard.metrics.net_pnl > 0 %}green{% elif dashboard.metrics.net_pnl < 0 %}red{% endif %}">{{ dashboard.metrics.net_pnl }}</div></div>
+      <div class="card"><div class="label">Nguồn dữ liệu</div><div class="value gray">Google Sheets</div></div>
+    </div>
+
+    <div class="chart-card">
+      <h3>Biểu đồ PnL lũy kế</h3>
+      <canvas id="pnlChart" height="90"></canvas>
+    </div>
+
+    <div class="table-card">
+      <h3>Lịch sử giao dịch gần nhất</h3>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Thời gian</th>
+              <th>Mã lệnh</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Strategy</th>
+              <th>Khung</th>
+              <th>PnL</th>
+              <th>ROI %</th>
+              <th>KQ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% if not dashboard.trades %}
+            <tr>
+              <td colspan="9" class="gray">Chưa có dữ liệu giao dịch. Hãy kiểm tra Google Sheets hoặc mở demo: /dashboard?demo=1</td>
+            </tr>
+            {% endif %}
+            {% for t in dashboard.trades %}
+            <tr>
+              <td>{{ t.time_close }}</td>
+              <td>{{ t.label }}</td>
+              <td>{{ t.symbol }}</td>
+              <td>{{ t.side }}</td>
+              <td>{{ t.strategy }}</td>
+              <td>{{ t.interval }}</td>
+              <td class="{% if t.pnl > 0 %}green{% elif t.pnl < 0 %}red{% endif %}">{{ t.pnl }}</td>
+              <td>{{ t.roi_pct }}</td>
+              <td>{{ t.result }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const points = {{ dashboard.pnl_curve | tojson }};
+    const labels = points.map(p => p.trade_no);
+    const data = points.map(p => p.cumulative_pnl);
+
+    const ctx = document.getElementById('pnlChart').getContext('2d');
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Cumulative PnL',
+          data,
+          borderColor: '#4ea1ff',
+          backgroundColor: 'rgba(78,161,255,0.15)',
+          fill: true,
+          tension: 0.2,
+          pointRadius: 2
+        }]
+      },
+      options: {
+        plugins: { legend: { labels: { color: '#c8d5ef' } } },
+        scales: {
+          x: { ticks: { color: '#9fb1d5' }, grid: { color: '#1c2a46' } },
+          y: { ticks: { color: '#9fb1d5' }, grid: { color: '#1c2a46' } }
+        }
+      }
+    });
+  </script>
+</body>
+</html>

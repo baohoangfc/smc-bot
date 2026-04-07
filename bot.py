@@ -5,7 +5,7 @@ bot.py — Trái tim của SMC Bot. Chứa loop chính (Data Fetching + Signal S
 import os
 import time
 import threading
-from flask import Flask
+from flask import Flask, jsonify, render_template, request
 
 # Các cấu hình và biến toàn cục
 from config import (
@@ -65,6 +65,22 @@ app = Flask(__name__)
 @app.route("/")
 def health_check():
     return "SMC Bot is running!", 200
+
+
+@app.route("/dashboard")
+def dashboard_page():
+    from gsheets import get_dashboard_payload, get_demo_dashboard_payload
+    use_demo = str(request.args.get("demo", "0")).lower() in {"1", "true", "yes"}
+    data = get_demo_dashboard_payload() if use_demo else get_dashboard_payload(limit=300)
+    return render_template("dashboard.html", dashboard=data)
+
+
+@app.route("/api/dashboard")
+def dashboard_api():
+    from gsheets import get_dashboard_payload, get_demo_dashboard_payload
+    use_demo = str(request.args.get("demo", "0")).lower() in {"1", "true", "yes"}
+    data = get_demo_dashboard_payload() if use_demo else get_dashboard_payload(limit=300)
+    return jsonify(data)
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
