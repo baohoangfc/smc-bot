@@ -480,7 +480,7 @@ def setup_dashboard():
         ]
 
         ws.clear()
-        ws.update(data, 'A1')
+        ws.update(data, 'A1', value_input_option='USER_ENTERED')
 
         sp = _get_spreadsheet()
         if sp is None:
