@@ -208,8 +208,9 @@ last_tp_sl_sync_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 last_gsheet_active_sync_ts = 0.0
 
 try:
-    from gsheets import setup_dashboard
+    from gsheets import setup_dashboard, rebuild_trade_and_pnl_history
     setup_dashboard()
+    rebuild_trade_and_pnl_history()
 except Exception as e:
     print(f"[WARN] setup_dashboard failed: {e}")
 
