@@ -1,0 +1,20 @@
+{% extends 'base_readonly.html' %}
+{% block content %}
+<div class="table-card">
+  <h3>Lịch sử giao dịch đầy đủ</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>#</th><th>Time</th><th>Mã lệnh</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Khung</th><th>PnL</th><th>ROI%</th><th>Duration</th><th>KQ</th></tr></thead>
+      <tbody>
+      {% for t in trade_history %}
+      <tr>
+        <td>{{ t.trade_no }}</td><td>{{ t.time_close }}</td><td>{{ t.label }}</td><td>{{ t.symbol }}</td><td>{{ t.side }}</td>
+        <td>{{ t.strategy }}</td><td>{{ t.interval }}</td><td class="{% if t.pnl>0 %}green{% elif t.pnl<0 %}red{% endif %}">{{ t.pnl }}</td>
+        <td>{{ t.roi_pct }}</td><td>{{ t.duration_mins }}</td><td>{{ t.result }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

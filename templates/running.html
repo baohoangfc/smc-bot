@@ -1,0 +1,19 @@
+{% extends 'base_readonly.html' %}
+{% block content %}
+<div class="table-card">
+  <h3>Lệnh đang chạy</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Symbol</th><th>Mã lệnh</th><th>Side</th><th>Mode</th><th>Entry</th><th>Live</th><th>SL</th><th>TP</th><th>PnL</th><th>ROI%</th><th>Opened</th></tr></thead>
+      <tbody>
+      {% for p in running_positions %}
+      <tr>
+        <td>{{ p.symbol }}</td><td>{{ p.label }}</td><td>{{ p.side }}</td><td>{{ p.mode }}</td><td>{{ p.entry }}</td><td>{{ p.live_price }}</td>
+        <td>{{ p.sl }}</td><td>{{ p.tp }}</td><td class="{% if p.pnl>0 %}green{% elif p.pnl<0 %}red{% endif %}">{{ p.pnl }}</td><td>{{ p.roi_pct }}</td><td>{{ p.time_opened }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

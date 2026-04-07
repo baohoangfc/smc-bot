@@ -160,6 +160,67 @@ def _to_float(value, default=0.0):
         return default
 
 
+def _parse_trade_time(time_raw) -> datetime | None:
+    txt = str(time_raw or "").strip()
+    if not txt:
+        return None
+    try:
+        return datetime.fromisoformat(txt)
+    except Exception:
+        try:
+            return datetime.strptime(txt, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+
+def _build_period_summary(trades: list[dict]) -> dict:
+    buckets = {
+        "day": defaultdict(lambda: {"trades": 0, "net_pnl": 0.0, "wins": 0, "losses": 0, "breakeven": 0}),
+        "month": defaultdict(lambda: {"trades": 0, "net_pnl": 0.0, "wins": 0, "losses": 0, "breakeven": 0}),
+        "year": defaultdict(lambda: {"trades": 0, "net_pnl": 0.0, "wins": 0, "losses": 0, "breakeven": 0}),
+    }
+
+    for t in trades:
+        pnl = _to_float(t.get("pnl"), 0.0)
+        dt = _parse_trade_time(t.get("time_close"))
+        if dt is None:
+            continue
+
+        keys = {
+            "day": dt.strftime("%Y-%m-%d"),
+            "month": dt.strftime("%Y-%m"),
+            "year": dt.strftime("%Y"),
+        }
+        for period, key in keys.items():
+            item = buckets[period][key]
+            item["trades"] += 1
+            item["net_pnl"] += pnl
+            if pnl > 0:
+                item["wins"] += 1
+            elif pnl < 0:
+                item["losses"] += 1
+            else:
+                item["breakeven"] += 1
+
+    result = {"day": [], "month": [], "year": []}
+    keep = {"day": 31, "month": 18, "year": 10}
+    for period in ("day", "month", "year"):
+        for key in sorted(buckets[period].keys())[-keep[period]:]:
+            row = buckets[period][key]
+            total = int(row["trades"])
+            wins = int(row["wins"])
+            result[period].append({
+                "period": key,
+                "trades": total,
+                "net_pnl": round(row["net_pnl"], 6),
+                "wins": wins,
+                "losses": int(row["losses"]),
+                "breakeven": int(row["breakeven"]),
+                "win_rate": round((wins / total * 100.0) if total else 0.0, 4),
+            })
+    return result
+
+
 def _safe_profit_factor(gross_profit: float, gross_loss: float) -> float:
     if gross_loss == 0:
         return float("inf") if gross_profit > 0 else 0.0
@@ -681,7 +742,17 @@ def get_dashboard_payload(limit: int = 200) -> dict:
             "breakeven": 0,
             "win_rate": 0.0,
             "net_pnl": 0.0,
+            "wallet_balance": 0.0,
+            "wallet_equity": 0.0,
+            "wallet_available": 0.0,
+            "wallet_used_margin": 0.0,
+            "running_positions": 0,
+            "running_pnl_total": 0.0,
+            "running_pnl_positive": 0.0,
+            "running_pnl_negative": 0.0,
         },
+        "period_summary": {"day": [], "month": [], "year": []},
+        "data_source": "Google Sheets + BingX",
     }
 
     sp = _get_spreadsheet()
@@ -699,9 +770,17 @@ def get_dashboard_payload(limit: int = 200) -> dict:
         pnl_ws = None
 
     try:
+        active_ws = sp.worksheet("Active_Positions")
+    except Exception:
+        active_ws = None
+
+    all_trade_rows = []
+
+    try:
         if trade_ws is not None:
             rows = trade_ws.get_all_records()
             if rows:
+                all_trade_rows = rows
                 recent_rows = rows[-max(limit, 1):]
                 for r in reversed(recent_rows):
                     pnl = _to_float(r.get("PnL"), 0.0)
@@ -724,6 +803,17 @@ def get_dashboard_payload(limit: int = 200) -> dict:
                     })
     except Exception as e:
         print(f"[WARN] get_dashboard_payload/trade_rows lỗi: {e}")
+
+    try:
+        if active_ws is not None:
+            running_rows = active_ws.get_all_records()
+            running_pnls = [_to_float(r.get("PnL"), 0.0) for r in running_rows]
+            payload["metrics"]["running_positions"] = len(running_pnls)
+            payload["metrics"]["running_pnl_total"] = round(sum(running_pnls), 6)
+            payload["metrics"]["running_pnl_positive"] = round(sum(v for v in running_pnls if v > 0), 6)
+            payload["metrics"]["running_pnl_negative"] = round(sum(v for v in running_pnls if v < 0), 6)
+    except Exception as e:
+        print(f"[WARN] get_dashboard_payload/active_rows lỗi: {e}")
 
     try:
         if pnl_ws is not None:
@@ -770,7 +860,35 @@ def get_dashboard_payload(limit: int = 200) -> dict:
             "breakeven": be,
             "win_rate": round((wins / total * 100.0) if total else 0.0, 4),
             "net_pnl": round(net_pnl, 6),
+            "wallet_balance": payload["metrics"]["wallet_balance"],
+            "wallet_equity": payload["metrics"]["wallet_equity"],
+            "wallet_available": payload["metrics"]["wallet_available"],
+            "wallet_used_margin": payload["metrics"]["wallet_used_margin"],
+            "running_positions": payload["metrics"]["running_positions"],
+            "running_pnl_total": payload["metrics"]["running_pnl_total"],
+            "running_pnl_positive": payload["metrics"]["running_pnl_positive"],
+            "running_pnl_negative": payload["metrics"]["running_pnl_negative"],
         }
+
+    try:
+        from bingx_client import bing_client, has_api_credentials
+        if has_api_credentials():
+            wallet = bing_client.get_balance_info("VST")
+            payload["metrics"]["wallet_balance"] = round(_to_float(wallet.get("balance"), 0.0), 6)
+            payload["metrics"]["wallet_equity"] = round(_to_float(wallet.get("equity"), 0.0), 6)
+            payload["metrics"]["wallet_available"] = round(_to_float(wallet.get("availableMargin"), 0.0), 6)
+            payload["metrics"]["wallet_used_margin"] = round(_to_float(wallet.get("usedMargin"), 0.0), 6)
+    except Exception as e:
+        print(f"[WARN] get_dashboard_payload/wallet lỗi: {e}")
+
+    summary_source = [
+        {
+            "time_close": str(r.get("Time_Close", "") or ""),
+            "pnl": _to_float(r.get("PnL"), 0.0),
+        }
+        for r in all_trade_rows
+    ]
+    payload["period_summary"] = _build_period_summary(summary_source)
 
     return payload
 
@@ -822,6 +940,91 @@ def get_demo_dashboard_payload() -> dict:
             "net_pnl": round(sum(pnl_samples), 4),
         },
     }
+
+
+def get_readonly_site_payload(limit: int = 300) -> dict:
+    """
+    Payload tổng cho website read-only nhiều trang:
+    - overview: KPI + curve + recent trades + period summary
+    - trade_history: toàn bộ lịch sử đã đóng
+    - running_positions: lệnh đang chạy
+    - analytics: dữ liệu tổng hợp theo day/month/year
+    - system: trạng thái nguồn dữ liệu
+    """
+    overview = get_dashboard_payload(limit=limit)
+    payload = {
+        "overview": overview,
+        "trade_history": [],
+        "running_positions": [],
+        "analytics": {
+            "day": overview.get("period_summary", {}).get("day", []),
+            "month": overview.get("period_summary", {}).get("month", []),
+            "year": overview.get("period_summary", {}).get("year", []),
+        },
+        "system": {
+            "data_source": overview.get("data_source", "Google Sheets + BingX"),
+            "sheet_connected": False,
+            "last_trade_time": "",
+            "last_running_update": "",
+            "errors": [],
+        },
+    }
+
+    sp = _get_spreadsheet()
+    if sp is None:
+        payload["system"]["errors"].append("Không kết nối được Google Sheets.")
+        return payload
+
+    payload["system"]["sheet_connected"] = True
+
+    # Trade history đầy đủ
+    try:
+        trade_ws = sp.worksheet("Trade_History")
+        trade_rows = trade_ws.get_all_records()
+        for r in reversed(trade_rows):
+            item = {
+                "trade_no": int(_to_float(r.get("Trade #"), 0.0)),
+                "time_close": str(r.get("Time_Close", "") or ""),
+                "label": str(r.get("Mã Lệnh", "") or ""),
+                "symbol": str(r.get("Symbol", "") or ""),
+                "side": str(r.get("Side", "") or ""),
+                "strategy": str(r.get("Strategy", "") or ""),
+                "interval": str(r.get("Interval", "") or ""),
+                "pnl": round(_to_float(r.get("PnL"), 0.0), 6),
+                "roi_pct": _to_float(r.get("ROI %"), 0.0),
+                "result": str(r.get("Result", "") or ""),
+                "duration_mins": _to_float(r.get("Duration (Mins)"), 0.0),
+            }
+            payload["trade_history"].append(item)
+        if payload["trade_history"]:
+            payload["system"]["last_trade_time"] = payload["trade_history"][0]["time_close"]
+    except Exception as e:
+        payload["system"]["errors"].append(f"Trade_History lỗi: {e}")
+
+    # Running positions
+    try:
+        active_ws = sp.worksheet("Active_Positions")
+        active_rows = active_ws.get_all_records()
+        for r in active_rows:
+            payload["running_positions"].append({
+                "symbol": str(r.get("Symbol", "") or ""),
+                "label": str(r.get("Mã Lệnh", "") or ""),
+                "side": str(r.get("Side", "") or ""),
+                "mode": str(r.get("Mode", "") or ""),
+                "entry": _to_float(r.get("Entry"), 0.0),
+                "live_price": _to_float(r.get("Live Price"), 0.0),
+                "sl": _to_float(r.get("SL"), 0.0),
+                "tp": _to_float(r.get("TP"), 0.0),
+                "pnl": _to_float(r.get("PnL"), 0.0),
+                "roi_pct": _to_float(r.get("ROI %"), 0.0),
+                "time_opened": str(r.get("Time Opened", "") or ""),
+            })
+        if payload["running_positions"]:
+            payload["system"]["last_running_update"] = now_vn().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        payload["system"]["errors"].append(f"Active_Positions lỗi: {e}")
+
+    return payload
 
 def setup_dashboard():
     """
