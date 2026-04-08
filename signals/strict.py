@@ -5,7 +5,7 @@ import pandas as pd
 
 from config import (
     RR, INTERVAL, SWING_LOOKBACK, TREND_LOOKBACK, MIN_ATR_PCT,
-    SCALP_MIN_QUALITY_SCORE, SCALP_RR_TARGET, MIN_RISK_PCT, SL_BUFFER_PCT,
+    SCALP_MIN_QUALITY_SCORE, SCALP_RR_TARGET, SCALP_RR_MIN, MIN_RISK_PCT, SL_BUFFER_PCT,
     ALLOW_FALLBACK_SIGNAL, FALLBACK_MIN_QUALITY_SCORE, FALLBACK_REQUIRE_HIGH_LIQUIDITY,
 )
 from utils import get_dynamic_rr_max
@@ -59,7 +59,7 @@ def calc_scalp_tp_sl_v2(df: pd.DataFrame, side: str, entry: float, quality_score
 
     rr_used   = SCALP_RR_TARGET * trend_factor * vol_factor
     rr_ceiling = get_dynamic_rr_max(quality_score)
-    rr_used   = min(max(rr_used, SCALP_MIN_QUALITY_SCORE - 0.8), rr_ceiling)
+    rr_used   = min(max(rr_used, SCALP_RR_MIN), rr_ceiling)
 
     if side == "LONG":
         structure_sl = float(recent["low"].min()) - buffer
