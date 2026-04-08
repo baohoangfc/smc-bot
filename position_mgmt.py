@@ -9,7 +9,7 @@ from config import (
     HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS, LOW_LIQUIDITY_MAX_ACTIVE_ORDERS,
     MIN_SIGNAL_QUALITY_SCORE, SIGNAL_COOLDOWN_SECONDS, HIGH_QUALITY_THRESHOLD,
     HIGH_QUALITY_COOLDOWN_FACTOR, LEVERAGE, MARGIN_STANDARD,
-    BE_TRIGGER_PCT, BE_OFFSET_PCT,
+    BE_TRIGGER_PCT, BE_OFFSET_PCT, BE_INCLUDE_FEES, TAKER_FEE_PCT,
     TSL_ENABLED, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT,
     PARTIAL_TP_ROI_THRESHOLD, PARTIAL_TP_QUANTITY_FRACTION,
     INTERVAL,
@@ -174,13 +174,16 @@ def check_breakeven_condition(pos: dict, live_price: float, symbol: str = "") ->
     if entry <= 0 or tp <= 0 or sl <= 0:
         return pos
 
+    fee_buffer_pct = (2.0 * TAKER_FEE_PCT) if BE_INCLUDE_FEES else 0.0
+    total_be_offset_pct = BE_OFFSET_PCT + fee_buffer_pct
+
     if side == "LONG":
         full_range = tp - entry
         if full_range <= 0:
             return pos
         progress_pct = (float(live_price) - entry) / full_range * 100.0
         if progress_pct >= BE_TRIGGER_PCT:
-            new_sl = round(entry * (1 + BE_OFFSET_PCT / 100.0), 2)
+            new_sl = round(entry * (1 + total_be_offset_pct / 100.0), 2)
             if new_sl > sl:
                 pos = dict(pos)
                 pos["sl"]            = new_sl
@@ -189,7 +192,8 @@ def check_breakeven_condition(pos: dict, live_price: float, symbol: str = "") ->
                 send_telegram(
                     f"🔒 <b>{symbol} - {pos.get('label')}: Kích hoạt Breakeven</b>\n"
                     f"📈 Lệnh đang lãi {progress_pct:.1f}% tiến đến TP\n"
-                    f"🛑 SL mới: <b>{new_sl:.2f}</b> (Breakeven +{BE_OFFSET_PCT:.2f}%)\n"
+                    f"🛑 SL mới: <b>{new_sl:.2f}</b> (BE +{total_be_offset_pct:.2f}%"
+                    f"{' gồm phí' if BE_INCLUDE_FEES else ''})\n"
                     f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
                 )
     else:
@@ -198,7 +202,7 @@ def check_breakeven_condition(pos: dict, live_price: float, symbol: str = "") ->
             return pos
         progress_pct = (entry - float(live_price)) / full_range * 100.0
         if progress_pct >= BE_TRIGGER_PCT:
-            new_sl = round(entry * (1 - BE_OFFSET_PCT / 100.0), 2)
+            new_sl = round(entry * (1 - total_be_offset_pct / 100.0), 2)
             if new_sl < sl:
                 pos = dict(pos)
                 pos["sl"]            = new_sl
@@ -207,7 +211,8 @@ def check_breakeven_condition(pos: dict, live_price: float, symbol: str = "") ->
                 send_telegram(
                     f"🔒 <b>{symbol} - {pos.get('label')}: Kích hoạt Breakeven</b>\n"
                     f"📉 Lệnh đang lãi {progress_pct:.1f}% tiến đến TP\n"
-                    f"🛑 SL mới: <b>{new_sl:.2f}</b> (Breakeven +{BE_OFFSET_PCT:.2f}%)\n"
+                    f"🛑 SL mới: <b>{new_sl:.2f}</b> (BE +{total_be_offset_pct:.2f}%"
+                    f"{' gồm phí' if BE_INCLUDE_FEES else ''})\n"
                     f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
                 )
     return pos

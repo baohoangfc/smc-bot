@@ -91,6 +91,8 @@ SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "90"))
 # ===================== Breakeven =====================
 BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
 BE_OFFSET_PCT  = float(os.environ.get("BE_OFFSET_PCT", "0.05"))
+BE_INCLUDE_FEES = os.environ.get("BE_INCLUDE_FEES", "true").lower() == "true"
+TAKER_FEE_PCT   = float(os.environ.get("TAKER_FEE_PCT", "0.05"))
 
 # ===================== Partial Take Profit =====================
 PARTIAL_TP_ROI_THRESHOLD = float(os.environ.get("PARTIAL_TP_ROI_THRESHOLD", "100.0"))

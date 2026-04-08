@@ -7,6 +7,7 @@ import hmac
 import hashlib
 
 import pandas as pd
+from requests import RequestException
 
 from config import (
     BINGX_API_KEY, BINGX_SECRET_KEY, BINGX_URL,
@@ -23,6 +24,16 @@ class BingXClient:
     def __init__(self, api_key, secret_key):
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
+
+    def _safe_json(self, response):
+        try:
+            return response.json()
+        except Exception:
+            text_preview = (response.text or "")[:300]
+            return {
+                "code": -1,
+                "msg": f"Non-JSON response (status={response.status_code}): {text_preview}"
+            }
 
     def _build_signed_query(self, params):
         """
@@ -51,18 +62,43 @@ class BingXClient:
         }
         signed_query = self._build_signed_query(params)
         request_timeout = timeout or HTTP_TIMEOUT
-        
-        if method.upper() == "GET":
-            r = HTTP_SESSION.get(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=request_timeout)
-        else:
-            r = HTTP_SESSION.post(f"{BINGX_URL}{path}?{signed_query}", headers=headers, timeout=request_timeout)
-        return r.json()
+
+        url = f"{BINGX_URL}{path}?{signed_query}"
+        for attempt in range(1, 4):
+            try:
+                if method.upper() == "GET":
+                    r = HTTP_SESSION.get(url, headers=headers, timeout=request_timeout)
+                else:
+                    r = HTTP_SESSION.post(url, headers=headers, timeout=request_timeout)
+                payload = self._safe_json(r)
+                if int(payload.get("code", -1) or -1) == 109429 and attempt < 3:
+                    time.sleep(0.35 * attempt)
+                    continue
+                return payload
+            except RequestException as e:
+                if attempt < 3:
+                    time.sleep(0.35 * attempt)
+                    continue
+                return {"code": -1, "msg": f"HTTP request failed: {e}"}
+        return {"code": -1, "msg": "HTTP request failed after retries"}
 
     def _public_request(self, path, params=None, timeout=15):
         params = params or {}
         request_timeout = timeout or HTTP_TIMEOUT
-        r = HTTP_SESSION.get(f"{BINGX_URL}{path}", params=params, timeout=request_timeout)
-        return r.json()
+        for attempt in range(1, 3):
+            try:
+                r = HTTP_SESSION.get(f"{BINGX_URL}{path}", params=params, timeout=request_timeout)
+                payload = self._safe_json(r)
+                if int(payload.get("code", -1) or -1) == 109429 and attempt < 2:
+                    time.sleep(0.2 * attempt)
+                    continue
+                return payload
+            except RequestException as e:
+                if attempt < 2:
+                    time.sleep(0.2 * attempt)
+                    continue
+                return {"code": -1, "msg": f"HTTP public request failed: {e}"}
+        return {"code": -1, "msg": "HTTP public request failed after retries"}
 
     def get_balance_info(self, asset_name="VST"):
         """Lấy thông tin số dư chi tiết (balance/equity/availableMargin)."""
