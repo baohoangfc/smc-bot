@@ -16,6 +16,12 @@ from utils import now_vn
 _client = None
 _spreadsheet = None
 
+_SEMICOLON_LOCALE_PREFIXES = (
+    "vi", "fr", "de", "es", "it", "pt", "ru", "tr", "pl", "nl",
+    "cs", "sk", "hu", "uk", "ro", "bg", "hr", "sl", "sr", "da",
+    "fi", "sv", "nb",
+)
+
 def _get_spreadsheet():
     global _client, _spreadsheet
     if not _GSPREAD_AVAILABLE or not GOOGLE_SHEETS_CREDENTIALS_JSON or not GOOGLE_SHEET_ID:
@@ -1035,24 +1041,54 @@ def setup_dashboard():
         return
 
     try:
+        sp = _get_spreadsheet()
+        if sp is None:
+            return
+        locale = ""
+        try:
+            locale = str(sp.fetch_sheet_metadata().get("properties", {}).get("locale", "")).lower()
+        except Exception:
+            locale = ""
+        arg_sep = ";" if locale.startswith(_SEMICOLON_LOCALE_PREFIXES) else ","
+
+        def _fx(formula: str) -> str:
+            if arg_sep == ";":
+                return formula
+            return formula.replace(";", ",")
+
+        history_ws = None
+        history_ref = "'Sheet1'"
+        try:
+            history_ws = sp.sheet1
+            if history_ws.title != "Sheet1":
+                history_ws.update_title("Sheet1")
+            history_ref = "'Sheet1'"
+        except Exception:
+            try:
+                history_ws = sp.sheet1
+                safe_title = history_ws.title.replace("'", "''")
+                history_ref = f"'{safe_title}'"
+            except Exception:
+                history_ws = None
+
         data = [
             ["📈 SMC BOT DASHBOARD", "", "", "", "", "", "", "", "", ""],
-            ["Last Sync", '=IFERROR(TEXT(MAX(Sheet1!A2:A),"yyyy-mm-dd hh:mm:ss"), "N/A")', "", "Timezone", "UTC", "", "", "", "", ""],
+            ["Last Sync", _fx(f'=IFERROR(TEXT(MAX({history_ref}!A2:A);"yyyy-mm-dd hh:mm:ss"); "N/A")'), "", "Timezone", "UTC", "", "", "", "", ""],
             ["", "", "", "", "", "", "", "", "", ""],
             ["📊 Tổng quan", "Giá trị", "", "⚡ Hiệu suất", "Giá trị", "", "🛡️ Rủi ro", "Giá trị", "", ""],
-            ["Tổng lệnh", '=COUNTA(Sheet1!B2:B)', "", "Win rate", '=IF(B5=0,0,COUNTIF(Sheet1!N2:N,"WIN")/B5)', "", "Profit factor", '=IF(ABS(SUMIF(Sheet1!K2:K,"<0"))=0,"inf",SUMIF(Sheet1!K2:K,">0")/ABS(SUMIF(Sheet1!K2:K,"<0")))', "", ""],
-            ["WIN", '=COUNTIF(Sheet1!N2:N,"WIN")', "", "Avg PnL", '=IF(B5=0,0,SUM(Sheet1!K2:K)/B5)', "", "Max DD", '=IFERROR(MIN(ArrayFormula(SUMIF(ROW(Sheet1!K2:K),"<="&ROW(Sheet1!K2:K),Sheet1!K2:K)-MAX(FILTER(ArrayFormula(SUMIF(ROW(Sheet1!K2:K),"<="&ROW(Sheet1!K2:K),Sheet1!K2:K)),ROW(Sheet1!K2:K)<=ROW(Sheet1!K2:K)))),0)', "", ""],
-            ["LOSS", '=COUNTIF(Sheet1!N2:N,"LOSS")', "", "Avg WIN", '=IF(B6=0,0,SUMIF(Sheet1!K2:K,">0")/B6)', "", "Best trade", '=IFERROR(MAX(Sheet1!K2:K),0)', "", ""],
-            ["BREAKEVEN", '=COUNTIF(Sheet1!N2:N,"BREAKEVEN")', "", "Avg LOSS", '=IF(B7=0,0,SUMIF(Sheet1!K2:K,"<0")/B7)', "", "Worst trade", '=IFERROR(MIN(Sheet1!K2:K),0)', "", ""],
-            ["Net PnL", '=SUM(Sheet1!K2:K)', "", "Payoff ratio", '=IF(ABS(E8)=0,0,E7/ABS(E8))', "", "", "", "", ""],
+            ["Tổng lệnh", _fx(f'=COUNTA({history_ref}!B2:B)'), "", "Win rate", _fx(f'=IF(B5=0;0;COUNTIF({history_ref}!N2:N;"WIN")/B5)'), "", "Profit factor", _fx(f'=IF(ABS(SUMIF({history_ref}!K2:K;"<0"))=0;"inf";SUMIF({history_ref}!K2:K;">0")/ABS(SUMIF({history_ref}!K2:K;"<0")))'), "", ""],
+            ["WIN", _fx(f'=COUNTIF({history_ref}!N2:N;"WIN")'), "", "Avg PnL", _fx(f'=IF(B5=0;0;SUM({history_ref}!K2:K)/B5)'), "", "Max DD", _fx(f'=IFERROR(MIN(ArrayFormula(SUMIF(ROW({history_ref}!K2:K);"<="&ROW({history_ref}!K2:K);{history_ref}!K2:K)-MAX(FILTER(ArrayFormula(SUMIF(ROW({history_ref}!K2:K);"<="&ROW({history_ref}!K2:K);{history_ref}!K2:K));ROW({history_ref}!K2:K)<=ROW({history_ref}!K2:K))));0)'), "", ""],
+            ["LOSS", _fx(f'=COUNTIF({history_ref}!N2:N;"LOSS")'), "", "Avg WIN", _fx(f'=IF(B6=0;0;SUMIF({history_ref}!K2:K;">0")/B6)'), "", "Best trade", _fx(f'=IFERROR(MAX({history_ref}!K2:K);0)'), "", ""],
+            ["BREAKEVEN", _fx(f'=COUNTIF({history_ref}!N2:N;"BREAKEVEN")'), "", "Avg LOSS", _fx(f'=IF(B7=0;0;SUMIF({history_ref}!K2:K;"<0")/B7)'), "", "Worst trade", _fx(f'=IFERROR(MIN({history_ref}!K2:K);0)'), "", ""],
+            ["Net PnL", _fx(f'=SUM({history_ref}!K2:K)'), "", "Payoff ratio", _fx('=IF(ABS(E8)=0;0;E7/ABS(E8))'), "", "", "", "", ""],
             ["", "", "", "", "", "", "", "", "", ""],
             ["📅 Daily PnL (30 ngày)", "PnL", "", "📅 Weekly PnL (16 tuần)", "PnL", "", "", "", "", ""],
             [
-                '=IFERROR(TEXT(INDEX(SORT(UNIQUE(FILTER(IFERROR(DATEVALUE(LEFT(Sheet1!A2:A,10)),),Sheet1!A2:A<>"")),1,FALSE),SEQUENCE(30,1,1,1)),"yyyy-mm-dd"),"")',
-                '=IF(A12="","",SUM(FILTER(Sheet1!K2:K,IFERROR(DATEVALUE(LEFT(Sheet1!A2:A,10)),)=A12)))',
+                _fx(f'=IFERROR(TEXT(INDEX(SORT(UNIQUE(FILTER(IFERROR(DATEVALUE(LEFT({history_ref}!A2:A;10)););{history_ref}!A2:A<>""));1;FALSE);SEQUENCE(30;1;1;1));"yyyy-mm-dd");"")'),
+                _fx(f'=IF(A12="";"";SUM(FILTER({history_ref}!K2:K;IFERROR(DATEVALUE(LEFT({history_ref}!A2:A;10));)=A12)))'),
                 "",
-                '=IFERROR(INDEX(SORT(UNIQUE(FILTER(TEXT(IFERROR(DATEVALUE(LEFT(Sheet1!A2:A,10)),),"yyyy")&"-W"&TEXT(ISOWEEKNUM(IFERROR(DATEVALUE(LEFT(Sheet1!A2:A,10)),)),"00"),Sheet1!A2:A<>"")),1,FALSE),SEQUENCE(16,1,1,1)),"")',
-                '=IF(D12="", "", SUM(FILTER(Sheet1!K2:K, TEXT(IFERROR(DATEVALUE(LEFT(Sheet1!A2:A,10)),),"yyyy")&"-W"&TEXT(ISOWEEKNUM(IFERROR(DATEVALUE(LEFT(Sheet1!A2:A,10)),)),"00")=D12)))',
+                _fx(f'=IFERROR(INDEX(SORT(UNIQUE(FILTER(TEXT(IFERROR(DATEVALUE(LEFT({history_ref}!A2:A;10)););"yyyy")&"-W"&TEXT(ISOWEEKNUM(IFERROR(DATEVALUE(LEFT({history_ref}!A2:A;10));));"00");{history_ref}!A2:A<>""));1;FALSE);SEQUENCE(16;1;1;1));"")'),
+                _fx(f'=IF(D12=""; ""; SUM(FILTER({history_ref}!K2:K; TEXT(IFERROR(DATEVALUE(LEFT({history_ref}!A2:A;10)););"yyyy")&"-W"&TEXT(ISOWEEKNUM(IFERROR(DATEVALUE(LEFT({history_ref}!A2:A;10));));"00")=D12)))'),
                 "",
                 "",
                 "",
@@ -1064,13 +1100,10 @@ def setup_dashboard():
         ws.clear()
         ws.update(data, 'A1', value_input_option='USER_ENTERED')
 
-        sp = _get_spreadsheet()
-        if sp is None:
-            return
-
         history_id = None
         try:
-            history_id = sp.sheet1.id
+            if history_ws is not None:
+                history_id = history_ws.id
         except Exception:
             history_id = None
 
