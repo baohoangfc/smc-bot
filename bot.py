@@ -276,6 +276,10 @@ last_pnl_notified_pct_by_symbol = {symbol: {} for symbol in SYMBOLS}
 closed_cycle_pnl_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 bootstrapped_signal_by_symbol = {symbol: False for symbol in SYMBOLS}
 last_entry_ts_by_symbol = {symbol: {} for symbol in SYMBOLS}
+last_filled_order_ts_by_symbol = {
+    symbol: (time.time() if active_positions_by_symbol.get(symbol) else 0.0)
+    for symbol in SYMBOLS
+}
 last_skip_reason_by_symbol = {symbol: "Bot vừa khởi động, đang chờ tín hiệu hợp lệ đầu tiên." for symbol in SYMBOLS}
 last_wait_log_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 last_tp_sl_sync_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
@@ -349,6 +353,8 @@ while True:
             signal = pick_best_signal(candidates, signal_eval_time)
             
             if signal:
+                silence_seconds = max(0.0, time.time() - float(last_filled_order_ts_by_symbol.get(symbol, 0.0) or 0.0))
+                signal["silence_hours"] = round(silence_seconds / 3600.0, 2)
                 active_limit = current_max_active_orders(signal_eval_time)
                 if signal.get("source", DATA_SOURCE) != "BINGX":
                     last_skip_reason_by_symbol[symbol] = f"Nguồn tín hiệu không hợp lệ: {signal.get('source')}"
@@ -471,8 +477,15 @@ while True:
                     if effective_rr is not None:
                         order_signal["rr"] = effective_rr
 
-                    quality = order_signal.get("quality_score", 0)
-                    used_margin = MARGIN_HIGH_QUALITY if quality >= HIGH_QUALITY_THRESHOLD else MARGIN_STANDARD
+                    quality_tier = order_signal.get("quality_tier", signal.get("quality_tier", "standard"))
+                    if quality_tier == "premium":
+                        used_margin = MARGIN_HIGH_QUALITY
+                    elif quality_tier == "high":
+                        used_margin = (MARGIN_STANDARD + MARGIN_HIGH_QUALITY) / 2.0
+                    else:
+                        used_margin = MARGIN_STANDARD
+                    order_signal["quality_tier"] = quality_tier
+                    order_signal["margin"] = used_margin
                     notional = used_margin * LEVERAGE
                     
                     quantity = calc_order_quantity(last_price, notional)
@@ -485,6 +498,7 @@ while True:
                     if order and order.get("code") == 0:
                         last_skip_reason_by_symbol[symbol] = "Đã vào lệnh thành công."
                         last_entry_ts_by_symbol[symbol][signal_bucket] = time.time()
+                        last_filled_order_ts_by_symbol[symbol] = time.time()
                         fill_price = extract_order_avg_price(order, last_price)
                         send_telegram(format_order_result_msg(order_signal, symbol, order, order_label, fill_price, vst_balance_text=f"{vst_bal:.1f}"))
                         

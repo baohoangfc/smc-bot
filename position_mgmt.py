@@ -7,7 +7,7 @@ from config import (
     MAX_ACTIVE_ORDERS, LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_FOCUS_MODE,
     LIQUIDITY_WINDOWS_VN, LIQUIDITY_SOFT_MIN_RR, LIQUIDITY_SOFT_MIN_QUALITY,
     HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS, LOW_LIQUIDITY_MAX_ACTIVE_ORDERS,
-    MIN_SIGNAL_QUALITY_SCORE, SIGNAL_COOLDOWN_SECONDS, HIGH_QUALITY_THRESHOLD,
+    MIN_SIGNAL_QUALITY_SCORE, MIN_ORDER_RR, SIGNAL_COOLDOWN_SECONDS, HIGH_QUALITY_THRESHOLD,
     HIGH_QUALITY_COOLDOWN_FACTOR, LEVERAGE, MARGIN_STANDARD,
     BE_TRIGGER_PCT, BE_OFFSET_PCT, BE_INCLUDE_FEES, TAKER_FEE_PCT,
     TSL_ENABLED, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT,
@@ -55,9 +55,56 @@ def current_max_active_orders(dt_value=None) -> int:
 
 def passes_quality_gate(signal: dict) -> tuple[bool, str]:
     quality_now = float(signal.get("quality_score", 0) or 0)
-    if quality_now < MIN_SIGNAL_QUALITY_SCORE:
-        return False, f"Quality thấp ({quality_now:.2f} < {MIN_SIGNAL_QUALITY_SCORE:.2f})"
-    return True, f"Quality đạt ({quality_now:.2f})"
+    rr_now      = calc_rr_from_levels(signal.get("side"), signal.get("entry"), signal.get("tp"), signal.get("sl"))
+    if rr_now is None:
+        rr_now = float(signal.get("rr", 0) or 0)
+    mode = str(signal.get("signal_mode", "") or "").lower()
+    silence_hours = max(0.0, float(signal.get("silence_hours", 0.0) or 0.0))
+
+    min_quality_required = float(MIN_SIGNAL_QUALITY_SCORE)
+    min_rr_required = float(MIN_ORDER_RR)
+    if "fallback" in mode:
+        min_quality_required += 0.20
+        min_rr_required += 0.10
+    elif mode == "grid":
+        min_quality_required += 0.10
+
+    relax_quality = 0.0
+    relax_rr = 0.0
+    if silence_hours >= 48:
+        relax_quality, relax_rr = 0.35, 0.15
+    elif silence_hours >= 24:
+        relax_quality, relax_rr = 0.25, 0.10
+    elif silence_hours >= 12:
+        relax_quality, relax_rr = 0.15, 0.05
+    if "fallback" in mode:
+        relax_quality = min(relax_quality, 0.10)
+        relax_rr = min(relax_rr, 0.05)
+    min_quality_required = max(1.60, min_quality_required - relax_quality)
+    min_rr_required = max(0.90, min_rr_required - relax_rr)
+
+    if quality_now < min_quality_required:
+        return False, (
+            f"Quality thấp ({quality_now:.2f} < {min_quality_required:.2f})"
+            f"{' | Anti-silent ON' if relax_quality > 0 else ''}"
+        )
+    if rr_now < min_rr_required:
+        return False, (
+            f"RR thấp ({rr_now:.2f} < {min_rr_required:.2f})"
+            f"{' | Anti-silent ON' if relax_rr > 0 else ''}"
+        )
+
+    if quality_now >= (HIGH_QUALITY_THRESHOLD + 0.25) and rr_now >= (min_rr_required + 0.20):
+        signal["quality_tier"] = "premium"
+    elif quality_now >= (MIN_SIGNAL_QUALITY_SCORE + 0.35) and rr_now >= (min_rr_required + 0.10):
+        signal["quality_tier"] = "high"
+    else:
+        signal["quality_tier"] = "standard"
+
+    return True, (
+        f"Gate đạt ({signal['quality_tier']} | Q={quality_now:.2f}, RR={rr_now:.2f}"
+        f"{', Anti-silent ON' if (relax_quality > 0 or relax_rr > 0) else ''})"
+    )
 
 
 def effective_signal_cooldown(signal: dict) -> int:

@@ -59,7 +59,8 @@ def build_entry_reason(signal):
         signal["side"], signal.get("entry"), signal.get("tp"), signal.get("sl"),
         fallback_rr=signal.get("rr", SCALP_RR_TARGET), decimals=2
     )
-    return f"{strategy.upper()} {tf} | mode={mode} | quality={quality_text} | RR={rr_text}"
+    quality_tier = signal.get("quality_tier", "standard")
+    return f"{strategy.upper()} {tf} | mode={mode} | tier={quality_tier} | quality={quality_text} | RR={rr_text}"
 
 
 def format_startup_msg(vst_balance, is_trading_enabled, engine_used,
