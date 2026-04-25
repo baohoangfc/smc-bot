@@ -227,6 +227,75 @@ def _build_period_summary(trades: list[dict]) -> dict:
     return result
 
 
+def get_eod_pnl_summary(target_date: str | None = None) -> dict:
+    """
+    Tổng hợp PnL theo ngày từ Trade_History (fallback Sheet1 nếu cần).
+    target_date: chuỗi YYYY-MM-DD theo giờ VN.
+    """
+    sp = _get_spreadsheet()
+    if sp is None:
+        return {"ok": False, "reason": "Google Sheets chưa sẵn sàng."}
+
+    rows = []
+    try:
+        rows = sp.worksheet("Trade_History").get_all_records()
+    except Exception:
+        try:
+            rows = sp.sheet1.get_all_records()
+        except Exception as e:
+            return {"ok": False, "reason": f"Không đọc được dữ liệu lịch sử: {e}"}
+
+    if not rows:
+        return {"ok": False, "reason": "Chưa có giao dịch đã đóng để tổng hợp."}
+
+    day_map: dict[str, dict] = defaultdict(lambda: {"trades": 0, "net_pnl": 0.0})
+    for r in rows:
+        dt = _parse_trade_time(r.get("Time_Close"))
+        if dt is None:
+            continue
+        day_key = dt.strftime("%Y-%m-%d")
+        pnl = _to_float(r.get("PnL"), 0.0)
+        day_map[day_key]["trades"] += 1
+        day_map[day_key]["net_pnl"] += pnl
+
+    if not day_map:
+        return {"ok": False, "reason": "Không parse được ngày giao dịch hợp lệ."}
+
+    day_keys = sorted(day_map.keys())
+    selected_date = target_date or now_vn().strftime("%Y-%m-%d")
+    selected_day = day_map.get(selected_date, {"trades": 0, "net_pnl": 0.0})
+
+    total_trades = sum(int(v["trades"]) for v in day_map.values())
+    total_pnl = sum(float(v["net_pnl"]) for v in day_map.values())
+    positive_days = sum(1 for v in day_map.values() if float(v["net_pnl"]) > 0)
+    negative_days = sum(1 for v in day_map.values() if float(v["net_pnl"]) < 0)
+    flat_days = sum(1 for v in day_map.values() if float(v["net_pnl"]) == 0)
+
+    best_key = max(day_keys, key=lambda k: float(day_map[k]["net_pnl"]))
+    worst_key = min(day_keys, key=lambda k: float(day_map[k]["net_pnl"]))
+
+    return {
+        "ok": True,
+        "daily": {
+            "date": selected_date,
+            "trades": int(selected_day["trades"]),
+            "net_pnl": float(selected_day["net_pnl"]),
+        },
+        "all_days": {
+            "start_date": day_keys[0],
+            "end_date": day_keys[-1],
+            "total_days": len(day_keys),
+            "total_trades": total_trades,
+            "total_pnl": float(total_pnl),
+            "positive_days": positive_days,
+            "negative_days": negative_days,
+            "flat_days": flat_days,
+            "best_day": {"date": best_key, "net_pnl": float(day_map[best_key]["net_pnl"])},
+            "worst_day": {"date": worst_key, "net_pnl": float(day_map[worst_key]["net_pnl"])},
+        },
+    }
+
+
 def _safe_profit_factor(gross_profit: float, gross_loss: float) -> float:
     if gross_loss == 0:
         return float("inf") if gross_profit > 0 else 0.0

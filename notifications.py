@@ -199,3 +199,42 @@ def format_closed_positions_summary(symbol, total_pnl):
         f"💵 Tổng PnL đã đóng: <b>{total_pnl:+.2f} USDT</b>\n"
         f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
     )
+
+
+def format_eod_daily_pnl_msg(report_date: str, trades: int, net_pnl: float):
+    emoji = "🟢" if net_pnl >= 0 else "🔴"
+    return (
+        f"{emoji} <b>Tổng kết PnL ngày {report_date}</b>\n"
+        f"📦 Số lệnh đã đóng: <b>{int(trades)}</b>\n"
+        f"💵 PnL ròng trong ngày: <b>{float(net_pnl):+.2f} USDT</b>\n"
+        f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
+    )
+
+
+def format_eod_all_days_pnl_msg(summary: dict):
+    total_pnl = float(summary.get("total_pnl", 0.0))
+    emoji = "🟢" if total_pnl >= 0 else "🔴"
+    best_day = summary.get("best_day") or {}
+    worst_day = summary.get("worst_day") or {}
+
+    best_text = "N/A"
+    if best_day:
+        best_text = f"{best_day.get('date')} ({float(best_day.get('net_pnl', 0.0)):+.2f} USDT)"
+
+    worst_text = "N/A"
+    if worst_day:
+        worst_text = f"{worst_day.get('date')} ({float(worst_day.get('net_pnl', 0.0)):+.2f} USDT)"
+
+    return (
+        f"{emoji} <b>Tổng hợp PnL tất cả ngày đã tracking</b>\n"
+        f"📅 Giai đoạn: <b>{summary.get('start_date', 'N/A')} → {summary.get('end_date', 'N/A')}</b>\n"
+        f"🧮 Số ngày có giao dịch: <b>{int(summary.get('total_days', 0))}</b>\n"
+        f"📦 Tổng số lệnh: <b>{int(summary.get('total_trades', 0))}</b>\n"
+        f"💵 Tổng PnL lũy kế: <b>{total_pnl:+.2f} USDT</b>\n"
+        f"🟢 Ngày lãi: <b>{int(summary.get('positive_days', 0))}</b> | "
+        f"🔴 Ngày lỗ: <b>{int(summary.get('negative_days', 0))}</b> | "
+        f"⚪ Hòa vốn: <b>{int(summary.get('flat_days', 0))}</b>\n"
+        f"🏆 Ngày tốt nhất: <b>{best_text}</b>\n"
+        f"🧯 Ngày tệ nhất: <b>{worst_text}</b>\n"
+        f"⏰ <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
+    )
