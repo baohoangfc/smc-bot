@@ -30,7 +30,8 @@ from bingx_client import bing_client, has_api_credentials
 # Notification formatters & telegram sender
 from notifications import (
     send_telegram, format_startup_msg, format_signal_msg, format_status_msg,
-    format_order_result_msg, format_pnl_msg, format_closed_positions_summary, build_entry_reason
+    format_order_result_msg, format_pnl_msg, format_closed_positions_summary, build_entry_reason,
+    format_eod_daily_pnl_msg, format_eod_all_days_pnl_msg,
 )
 
 # Phân tích On-chart
@@ -284,6 +285,7 @@ last_skip_reason_by_symbol = {symbol: "Bot vừa khởi động, đang chờ tí
 last_wait_log_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 last_tp_sl_sync_ts_by_symbol = {symbol: 0.0 for symbol in SYMBOLS}
 last_gsheet_active_sync_ts = 0.0
+last_eod_report_date = None
 
 try:
     from gsheets import setup_dashboard, rebuild_trade_and_pnl_history
@@ -638,6 +640,32 @@ while True:
                 last_gsheet_active_sync_ts = time.time()
             except Exception as e:
                 pass
+
+        # Noti tổng hợp cuối ngày (23h VN): PnL trong ngày + PnL lũy kế tất cả ngày đã tracking.
+        vn_now = now_vn()
+        current_day = vn_now.strftime("%Y-%m-%d")
+        if vn_now.hour == 23 and vn_now.minute < 10 and last_eod_report_date != current_day:
+            try:
+                from gsheets import get_eod_pnl_summary
+                eod = get_eod_pnl_summary(target_date=current_day)
+                if eod.get("ok"):
+                    daily = eod.get("daily", {})
+                    all_days = eod.get("all_days", {})
+                    send_telegram(format_eod_daily_pnl_msg(
+                        str(daily.get("date", current_day)),
+                        int(daily.get("trades", 0)),
+                        float(daily.get("net_pnl", 0.0)),
+                    ))
+                    send_telegram(format_eod_all_days_pnl_msg(all_days))
+                else:
+                    send_telegram(
+                        "📊 <b>Tổng kết cuối ngày</b>\n"
+                        f"⚠️ Chưa tổng hợp được dữ liệu PnL: <b>{eod.get('reason', 'Không rõ nguyên nhân')}</b>\n"
+                        f"⏰ <b>{vn_now.strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
+                    )
+                last_eod_report_date = current_day
+            except Exception as e:
+                print(f"[WARN] gửi noti tổng kết cuối ngày lỗi: {e}")
 
         time.sleep(10)
     except Exception as e:
