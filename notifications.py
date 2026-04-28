@@ -115,9 +115,9 @@ def format_signal_msg(signal, symbol, order_label=None, vst_balance_text="N/A"):
     )
 
 
-def format_status_msg(symbol, last_price, candle_time, tracked_tfs, wait_reason=None):
+def format_status_msg(symbol, last_price, candle_time, tracked_tfs, wait_reason=None, next_update_hours=2):
     from datetime import timedelta
-    next_time   = now_vn() + timedelta(hours=1)
+    next_time   = now_vn() + timedelta(hours=max(1, int(next_update_hours)))
     reason_text = wait_reason or "Chưa có setup đạt điều kiện vào lệnh ở các khung đang theo dõi."
     if len(reason_text) > 420:
         reason_text = reason_text[:417].rstrip() + "..."
@@ -177,7 +177,7 @@ def format_pnl_msg(position, last_price, pnl, pnl_pct, notional_pnl_pct):
     
     order_label = position.get("label", "LỆNH")
     return (
-        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi ROI biến động ±10%</b>\n\n"
+        f"{pnl_emoji} <b>Theo dõi lệnh: báo khi ROI biến động ±20%</b>\n\n"
         f"🆔 Mã lệnh  : <b>{order_label}</b>\n"
         f"📌 Lệnh      : <b>{'MUA (LONG)' if side == 'LONG' else 'BÁN (SHORT)'}</b>\n"
         f"🎯 Entry     : <b>{format_price(entry)}</b>\n"

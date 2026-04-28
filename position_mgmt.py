@@ -12,7 +12,7 @@ from config import (
     BE_TRIGGER_PCT, BE_OFFSET_PCT, BE_INCLUDE_FEES, TAKER_FEE_PCT,
     TSL_ENABLED, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT,
     PARTIAL_TP_ROI_THRESHOLD, PARTIAL_TP_QUANTITY_FRACTION,
-    INTERVAL,
+    INTERVAL, TSL_NOTIFY_MIN_PROGRESS_DELTA, TSL_NOTIFY_MIN_SL_MOVE_PCT,
 )
 from utils import calc_rr_from_levels, now_vn
 from notifications import send_telegram
@@ -311,6 +311,18 @@ def check_trailing_stop(pos: dict, live_price: float, symbol: str = "") -> dict:
     if entry <= 0 or tp <= 0 or sl <= 0:
         return pos
 
+    def _should_notify_tsl(curr_pos: dict, candidate_sl: float, progress_pct: float) -> bool:
+        last_progress = curr_pos.get("tsl_last_notified_progress")
+        last_sl = curr_pos.get("tsl_last_notified_sl")
+        if last_progress is None or last_sl is None:
+            return True
+        progress_delta = abs(float(progress_pct) - float(last_progress))
+        sl_move_pct = abs(float(candidate_sl) - float(last_sl)) / max(abs(float(last_sl)), 1e-9) * 100.0
+        return (
+            progress_delta >= float(TSL_NOTIFY_MIN_PROGRESS_DELTA)
+            or sl_move_pct >= float(TSL_NOTIFY_MIN_SL_MOVE_PCT)
+        )
+
     lp = float(live_price)
     if side == "LONG":
         full_range   = tp - entry
@@ -328,12 +340,16 @@ def check_trailing_stop(pos: dict, live_price: float, symbol: str = "") -> dict:
             pos["sl"] = tsl_candidate
             peak_pct  = round(progress_pct, 1)
             print(f"[TSL] {symbol} {pos.get('label')} LONG: progress={peak_pct}% → trail SL → {tsl_candidate:.2f}")
-            send_telegram(
-                f"📡 <b>{symbol} - {pos.get('label')}: Trailing SL cập nhật</b>\n"
-                f"📈 Progress: {peak_pct}% → TP\n"
-                f"🛑 SL trail: <b>{tsl_candidate:.2f}</b> ({TSL_TRAIL_PCT:.2f}% từ giá hiện tại)\n"
-                f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
-            )
+            if _should_notify_tsl(pos, tsl_candidate, peak_pct):
+                pos["tsl_last_notified_progress"] = peak_pct
+                pos["tsl_last_notified_sl"] = tsl_candidate
+                send_telegram(
+                    f"📡 <b>{symbol} - {pos.get('label')}: Trailing SL cập nhật</b>\n"
+                    f"📈 Progress: {peak_pct}% → TP\n"
+                    f"🛑 SL trail: <b>{tsl_candidate:.2f}</b> ({trail_pct:.2f}% từ giá hiện tại)\n"
+                    f"ℹ️ Bot chỉ gửi lại khi thay đổi đáng kể để giảm nhiễu.\n"
+                    f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
+                )
     else:
         full_range   = entry - tp
         progress_pct = (entry - lp) / full_range * 100.0 if full_range > 0 else 0
@@ -346,12 +362,16 @@ def check_trailing_stop(pos: dict, live_price: float, symbol: str = "") -> dict:
             pos["sl"] = tsl_candidate
             peak_pct  = round(progress_pct, 1)
             print(f"[TSL] {symbol} {pos.get('label')} SHORT: progress={peak_pct}% → trail SL → {tsl_candidate:.2f}")
-            send_telegram(
-                f"📡 <b>{symbol} - {pos.get('label')}: Trailing SL cập nhật</b>\n"
-                f"📉 Progress: {peak_pct}% → TP\n"
-                f"🛑 SL trail: <b>{tsl_candidate:.2f}</b> ({trail_pct:.2f}% từ giá hiện tại)\n"
-                f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
-            )
+            if _should_notify_tsl(pos, tsl_candidate, peak_pct):
+                pos["tsl_last_notified_progress"] = peak_pct
+                pos["tsl_last_notified_sl"] = tsl_candidate
+                send_telegram(
+                    f"📡 <b>{symbol} - {pos.get('label')}: Trailing SL cập nhật</b>\n"
+                    f"📉 Progress: {peak_pct}% → TP\n"
+                    f"🛑 SL trail: <b>{tsl_candidate:.2f}</b> ({trail_pct:.2f}% từ giá hiện tại)\n"
+                    f"ℹ️ Bot chỉ gửi lại khi thay đổi đáng kể để giảm nhiễu.\n"
+                    f"⏰ {now_vn().strftime('%d/%m %H:%M')} (GMT+7)"
+                )
     return pos
 
 
