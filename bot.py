@@ -15,6 +15,7 @@ from config import (
     LEVERAGE, RR, MIN_TP_PCT, MIN_SL_PCT,
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
+    STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT,
 )
 
 # Helpers
@@ -525,11 +526,14 @@ while True:
                         err_msg = (order or {}).get("msg", "Không rõ lỗi")
                         last_skip_reason_by_symbol[symbol] = f"Lỗi đặt lệnh: {err_msg}"
 
-            elif (not active_positions) and (time.time() - last_status_notify_ts_by_symbol[symbol] >= 3600):
+            elif (not active_positions) and (time.time() - last_status_notify_ts_by_symbol[symbol] >= STATUS_NOTIFY_SECONDS):
                 active_limit = current_max_active_orders(now_vn())
                 liquidity_note = " Ngoài KH thanh khoản mở." if LIQUIDITY_FOCUS_ENABLED and not is_high_liquidity_time(now_vn()) else ""
                 wait_reason = f"Đang chờ ({', '.join(SIGNAL_INTERVALS)}). Lỗi/Skip: {last_skip_reason_by_symbol.get(symbol, 'N/A')}{liquidity_note}"
-                send_telegram(format_status_msg(symbol, live_price, candle_time, SIGNAL_INTERVALS, wait_reason))
+                send_telegram(format_status_msg(
+                    symbol, live_price, candle_time, SIGNAL_INTERVALS, wait_reason,
+                    next_update_hours=max(1, int(STATUS_NOTIFY_SECONDS // 3600)),
+                ))
                 last_status_notify_ts_by_symbol[symbol] = time.time()
 
             now_ts = time.time()
@@ -621,7 +625,7 @@ while True:
                     current_pnl = calc_live_pnl(pos, float(live_price))
                     pnl_pct = calc_live_pnl_pct(pos, float(live_price))
                     prev_notified_pct = last_pnl_notified_pct_by_symbol[symbol].get(label)
-                    if should_notify_pnl_change(prev_notified_pct, pnl_pct, threshold=10.0):
+                    if should_notify_pnl_change(prev_notified_pct, pnl_pct, threshold=PNL_NOTIFY_THRESHOLD_PCT):
                         # PnL notifications now use direct exchange data
                         from position_mgmt import calc_position_notional_base
                         n_pnl_pct = (current_pnl / max(1, calc_position_notional_base(pos))) * 100.0

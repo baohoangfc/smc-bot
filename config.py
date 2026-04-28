@@ -142,6 +142,10 @@ GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "")
 HTTP_TIMEOUT             = float(os.environ.get("HTTP_TIMEOUT", "15"))
 TELEGRAM_DEDUP_WINDOW_SECONDS = float(os.environ.get("TELEGRAM_DEDUP_WINDOW_SECONDS", "20"))
 WAIT_LOG_INTERVAL_SECONDS = int(os.environ.get("WAIT_LOG_INTERVAL_SECONDS", "60"))
+STATUS_NOTIFY_SECONDS = int(os.environ.get("STATUS_NOTIFY_SECONDS", "7200"))
+PNL_NOTIFY_THRESHOLD_PCT = float(os.environ.get("PNL_NOTIFY_THRESHOLD_PCT", "20.0"))
+TSL_NOTIFY_MIN_PROGRESS_DELTA = float(os.environ.get("TSL_NOTIFY_MIN_PROGRESS_DELTA", "15.0"))
+TSL_NOTIFY_MIN_SL_MOVE_PCT = float(os.environ.get("TSL_NOTIFY_MIN_SL_MOVE_PCT", "0.12"))
 
 # ===================== Parsed / Computed =====================
 def parse_intervals(raw_value, fallback):
