@@ -574,9 +574,8 @@ while True:
                 }
 
                 for pos in list(active_positions):
-                    # 1. Breakeven & Trailing Stop
+                    # 1. Breakeven
                     pos = check_breakeven_condition(pos, float(live_price), symbol)
-                    pos = check_trailing_stop(pos, float(live_price), symbol) 
                     
                     # 2. Partial Take Profit (Chốt lãi 50% tại 100% ROI)
                     from position_mgmt import check_partial_take_profit
@@ -598,6 +597,9 @@ while True:
                             )
                         else:
                             print(f"[ERROR] Không thể chốt lãi partial cho {symbol}: {close_res}")
+
+                    # 3. Trailing Stop (để nếu vừa partial TP xong thì có thể siết trail ngay trong cùng vòng lặp)
+                    pos = check_trailing_stop(pos, float(live_price), symbol)
                     
                     for i, tracked in enumerate(active_positions_by_symbol[symbol]):
                         if tracked.get("label") == pos.get("label"):
@@ -611,12 +613,24 @@ while True:
                         # Giảm tần suất gọi API check/update TP/SL để tránh Rate Limit (Error 109429)
                         if (now_ts - last_tp_sl_sync_ts_by_symbol.get(symbol, 0.0)) >= 120:
                             tp_on_exchange, sl_on_exchange = bing_client.get_position_protection_levels(symbol, pos["side"])
-                            missing_tp, missing_sl = pos.get("tp") is not None and tp_on_exchange is None, pos.get("sl") is not None and sl_on_exchange is None
-                            if missing_tp or missing_sl:
+                            missing_tp = pos.get("tp") is not None and tp_on_exchange is None
+                            missing_sl = pos.get("sl") is not None and sl_on_exchange is None
+                            desired_sl = float(pos.get("sl") or 0)
+                            exchange_sl = float(sl_on_exchange or 0)
+                            side = pos.get("side")
+                            sl_needs_tighten = False
+                            if desired_sl > 0 and exchange_sl > 0 and side in {"LONG", "SHORT"}:
+                                if side == "LONG":
+                                    sl_needs_tighten = desired_sl > exchange_sl
+                                else:
+                                    sl_needs_tighten = desired_sl < exchange_sl
+
+                            if missing_tp or missing_sl or sl_needs_tighten:
                                 bing_client.add_missing_tp_sl(
                                     symbol, pos["side"],
                                     pos.get("tp") if missing_tp else None,
-                                    pos.get("sl") if missing_sl else None,
+                                    pos.get("sl") if (missing_sl or sl_needs_tighten) else None,
+                                    force_sl=sl_needs_tighten,
                                 )
                             last_tp_sl_sync_ts_by_symbol[symbol] = now_ts
 
