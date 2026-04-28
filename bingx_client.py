@@ -482,9 +482,10 @@ class BingXClient:
             print(f"[WARN] close_position_market exception: {e}")
             return {"code": -1, "msg": str(e)}
 
-    def add_missing_tp_sl(self, symbol, pos_side, tp=None, sl=None):
+    def add_missing_tp_sl(self, symbol, pos_side, tp=None, sl=None, force_tp=False, force_sl=False):
         """
         Nếu vị thế hiện tại chưa có TP/SL trên sàn thì đặt bổ sung ngay.
+        Có thể bật force_tp/force_sl để đẩy lại mức TP/SL mới ngay cả khi trên sàn đã có.
         """
         try:
             if tp is None and sl is None:
@@ -499,7 +500,7 @@ class BingXClient:
             path = "/openApi/swap/v2/trade/order"
             result = {"tp_added": False, "sl_added": False, "position": position}
 
-            if position.get("tp") is None and tp is not None:
+            if (force_tp or position.get("tp") is None) and tp is not None:
                 tp_params = {
                     "symbol": symbol,
                     "side": close_side,
@@ -518,7 +519,7 @@ class BingXClient:
                 if not result["tp_added"]:
                     print(f"[WARN] Add TP thất bại: {tp_resp}")
 
-            if position.get("sl") is None and sl is not None:
+            if (force_sl or position.get("sl") is None) and sl is not None:
                 sl_params = {
                     "symbol": symbol,
                     "side": close_side,

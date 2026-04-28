@@ -277,7 +277,6 @@ def check_partial_take_profit(pos: dict, live_price: float, symbol: str = "") ->
     if pos.get("partial_tp_done"):
         return False, 0
 
-    from position_mgmt import calc_live_pnl_pct
     roi = calc_live_pnl_pct(pos, live_price)
     
     if roi >= PARTIAL_TP_ROI_THRESHOLD:
@@ -353,6 +352,8 @@ def check_trailing_stop(pos: dict, live_price: float, symbol: str = "") -> dict:
     else:
         full_range   = entry - tp
         progress_pct = (entry - lp) / full_range * 100.0 if full_range > 0 else 0
+        if progress_pct < TSL_ACTIVATION_PCT:
+            return pos
         # Thắt chặt Trailing Stop nếu đã chốt lời 50%
         trail_pct = 0.08 if pos.get("partial_tp_done") else TSL_TRAIL_PCT
         
