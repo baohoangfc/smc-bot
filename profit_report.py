@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from config import GOOGLE_SHEETS_CREDENTIALS_JSON, GOOGLE_SHEET_ID
+from utils import format_number
 
 try:
     import gspread
@@ -46,6 +47,37 @@ class Metrics:
     max_drawdown: float
 
 
+
+
+def parse_human_number(value, default=0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        cleaned = value.replace("%", "").strip().replace(" ", "")
+        if not cleaned:
+            return default
+        last_dot = cleaned.rfind(".")
+        last_comma = cleaned.rfind(",")
+        if last_dot >= 0 and last_comma >= 0:
+            cleaned = cleaned.replace(".", "").replace(",", ".") if last_comma > last_dot else cleaned.replace(",", "")
+        elif last_comma >= 0:
+            cleaned = cleaned.replace(",", ".") if len(cleaned) - last_comma - 1 in {1, 2} else cleaned.replace(",", "")
+        elif last_dot >= 0 and len(cleaned) - last_dot - 1 == 3 and cleaned.count(".") >= 1:
+            cleaned = cleaned.replace(".", "")
+        try:
+            return float(cleaned)
+        except Exception:
+            return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def numeric_series(series: pd.Series) -> pd.Series:
+    return series.map(parse_human_number).fillna(0.0)
+
+
 def _safe_profit_factor(gross_profit: float, gross_loss: float) -> float:
     if gross_loss == 0:
         return math.inf if gross_profit > 0 else 0.0
@@ -53,7 +85,7 @@ def _safe_profit_factor(gross_profit: float, gross_loss: float) -> float:
 
 
 def compute_metrics(df: pd.DataFrame, pnl_col: str) -> Metrics:
-    pnl = pd.to_numeric(df[pnl_col], errors="coerce").fillna(0.0)
+    pnl = numeric_series(df[pnl_col])
     total = int(len(df))
     wins = int((pnl > 0).sum())
     losses = int((pnl < 0).sum())
@@ -167,7 +199,7 @@ def write_report_to_google_sheet(
     except gspread.exceptions.WorksheetNotFound:  # type: ignore[attr-defined]
         ws = spreadsheet.add_worksheet(title=worksheet_name, rows="1500", cols="20")
 
-    pf = "inf" if math.isinf(metrics.profit_factor) else f"{metrics.profit_factor:.4f}"
+    pf = "inf" if math.isinf(metrics.profit_factor) else format_number(metrics.profit_factor, 4)
     rows = [
         ["SMC BOT PROFIT REPORT", ""],
         ["Range", f"{time_min} -> {time_max}"],
@@ -201,7 +233,7 @@ def write_report_to_google_sheet(
     ]
 
     ws.clear()
-    ws.update(rows, "A1")
+    ws.update(rows, "A1", value_input_option="USER_ENTERED")
 
     # Tô màu/định dạng cho dashboard nhìn dễ đọc hơn.
     daily_header_row = 15  # 1-indexed
@@ -366,7 +398,23 @@ def write_report_to_google_sheet(
         },
     ]
 
-    # Format số cho cột PnL/avg ở bảng Daily + Weekly.
+    # Format số có phân tách hàng nghìn cho metrics và các cột PnL/avg.
+    requests.append(
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": 2,
+                    "endRowIndex": 12,
+                    "startColumnIndex": 1,
+                    "endColumnIndex": 2,
+                },
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.####"}}},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }
+    )
+
     if len(daily_df) > 0:
         requests.append(
             {
@@ -378,7 +426,7 @@ def write_report_to_google_sheet(
                         "startColumnIndex": 2,
                         "endColumnIndex": 4,
                     },
-                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.0000"}}},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.####"}}},
                     "fields": "userEnteredFormat.numberFormat",
                 }
             }
@@ -395,7 +443,7 @@ def write_report_to_google_sheet(
                         "startColumnIndex": 2,
                         "endColumnIndex": 4,
                     },
-                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.0000"}}},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.####"}}},
                     "fields": "userEnteredFormat.numberFormat",
                 }
             }
@@ -573,20 +621,20 @@ def main() -> int:
     print("SMC BOT - PROFIT REPORT")
     print("=" * 72)
     print(f"Range: {df[args.time_col].min()} -> {df[args.time_col].max()}")
-    print(f"Total trades : {metrics.total_trades}")
+    print(f"Total trades : {format_number(metrics.total_trades, 0)}")
     print(f"Wins/Loss/BE: {metrics.wins}/{metrics.losses}/{metrics.breakeven}")
-    print(f"Win rate     : {metrics.win_rate_pct:.2f}%")
-    print(f"Gross profit : {metrics.gross_profit:.4f}")
-    print(f"Gross loss   : {metrics.gross_loss:.4f}")
-    print(f"Net PnL      : {metrics.net_pnl:.4f}")
-    print(f"Avg PnL/trade: {metrics.avg_pnl:.4f}")
-    print(f"Expectancy   : {metrics.expectancy:.4f}")
-    pf = "inf" if math.isinf(metrics.profit_factor) else f"{metrics.profit_factor:.4f}"
+    print(f"Win rate     : {format_number(metrics.win_rate_pct, 2)}%")
+    print(f"Gross profit : {format_number(metrics.gross_profit, 4)}")
+    print(f"Gross loss   : {format_number(metrics.gross_loss, 4)}")
+    print(f"Net PnL      : {format_number(metrics.net_pnl, 4)}")
+    print(f"Avg PnL/trade: {format_number(metrics.avg_pnl, 4)}")
+    print(f"Expectancy   : {format_number(metrics.expectancy, 4)}")
+    pf = "inf" if math.isinf(metrics.profit_factor) else format_number(metrics.profit_factor, 4)
     print(f"Profit factor: {pf}")
-    print(f"Max drawdown : {metrics.max_drawdown:.4f}")
+    print(f"Max drawdown : {format_number(metrics.max_drawdown, 4)}")
 
     summary = df.copy()
-    summary[args.pnl_col] = pd.to_numeric(summary[args.pnl_col], errors="coerce").fillna(0.0)
+    summary[args.pnl_col] = numeric_series(summary[args.pnl_col])
     summary["date"] = summary[args.time_col].dt.date
     summary["week"] = summary[args.time_col].dt.to_period("W-MON").astype(str)
 

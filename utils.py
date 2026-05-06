@@ -22,10 +22,33 @@ def now_vn():
     return datetime.utcnow() + timedelta(hours=7)
 
 
-def format_price(value):
+def format_number(value, max_decimals=4, min_decimals=0, default="N/A", thousands_sep=",", decimal_sep="."):
+    """Format số có phân tách hàng nghìn và tự rút gọn phần thập phân dư thừa."""
     if value is None:
-        return "N/A"
-    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+        return default
+    try:
+        num = float(value)
+    except Exception:
+        return default
+    if math.isnan(num) or math.isinf(num):
+        return default
+
+    max_decimals = max(int(max_decimals), 0)
+    min_decimals = max(min(int(min_decimals), max_decimals), 0)
+    text = f"{num:,.{max_decimals}f}"
+    if max_decimals > min_decimals:
+        integer_part, dot, decimal_part = text.partition(".")
+        decimal_part = decimal_part.rstrip("0")
+        if len(decimal_part) < min_decimals:
+            decimal_part = decimal_part.ljust(min_decimals, "0")
+        text = integer_part if not decimal_part else f"{integer_part}{dot}{decimal_part}"
+    if thousands_sep != "," or decimal_sep != ".":
+        text = text.replace(",", "__GROUP__").replace(".", decimal_sep).replace("__GROUP__", thousands_sep)
+    return text
+
+
+def format_price(value):
+    return format_number(value, max_decimals=2)
 
 
 def format_vn_time(dt_value, fmt="%d/%m/%Y %H:%M"):
