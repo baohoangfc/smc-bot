@@ -22,6 +22,38 @@ _SEMICOLON_LOCALE_PREFIXES = (
     "fi", "sv", "nb",
 )
 
+GROUPED_NUMBER_PATTERN = "#,##0.####"
+GROUPED_PRICE_PATTERN = "#,##0.##"
+GROUPED_PNL_PATTERN = "#,##0.######"
+GROUPED_PERCENT_NUMBER_PATTERN = "#,##0.##"
+
+
+def _number_format_request(sheet_id, start_row, end_row, start_col, end_col, pattern=GROUPED_NUMBER_PATTERN):
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": start_row,
+                "endRowIndex": end_row,
+                "startColumnIndex": start_col,
+                "endColumnIndex": end_col,
+            },
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pattern}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }
+    }
+
+
+def _apply_grouped_number_formats(sp, ws, ranges: list[tuple[int, int, int, int, str]]):
+    """Áp dụng format số có phân tách hàng nghìn cho các vùng Google Sheets."""
+    if sp is None or ws is None or not ranges:
+        return
+    try:
+        requests = [_number_format_request(ws.id, *r) for r in ranges]
+        sp.batch_update({"requests": requests})
+    except Exception as e:
+        print(f"[WARN] Không thể format số cho sheet {getattr(ws, 'title', '')}: {e}")
+
 def _get_spreadsheet():
     global _client, _spreadsheet
     if not _GSPREAD_AVAILABLE or not GOOGLE_SHEETS_CREDENTIALS_JSON or not GOOGLE_SHEET_ID:
@@ -62,6 +94,39 @@ def _get_or_create_worksheet(title, rows="1000", cols="20"):
     except Exception as e:
         print(f"[GSHEETS] Lỗi lấy worksheet {title}: {e}")
         return None
+
+def _format_sheet1_trade_log(sp, ws):
+    _apply_grouped_number_formats(sp, ws, [
+        (1, 5000, 6, 10, GROUPED_PRICE_PATTERN),      # Entry, Close Price, SL, TP
+        (1, 5000, 10, 13, GROUPED_PNL_PATTERN),       # PnL, ROI %, Duration
+        (1, 5000, 14, 15, GROUPED_NUMBER_PATTERN),    # Quality Score
+        (1, 5000, 16, 17, GROUPED_NUMBER_PATTERN),    # Expected RR
+    ])
+
+
+def _format_trade_history_sheet(sp, ws):
+    _apply_grouped_number_formats(sp, ws, [
+        (1, 5000, 0, 1, "#,##0"),
+        (1, 5000, 7, 11, GROUPED_PRICE_PATTERN),
+        (1, 5000, 11, 14, GROUPED_PNL_PATTERN),
+        (1, 5000, 15, 16, GROUPED_NUMBER_PATTERN),
+        (1, 5000, 17, 18, GROUPED_NUMBER_PATTERN),
+    ])
+
+
+def _format_pnl_history_sheet(sp, ws):
+    _apply_grouped_number_formats(sp, ws, [
+        (1, 5000, 0, 1, "#,##0"),
+        (1, 5000, 2, 5, GROUPED_PNL_PATTERN),
+        (1, 5000, 5, 8, "#,##0"),
+    ])
+
+
+def _format_active_positions_sheet(sp, ws):
+    _apply_grouped_number_formats(sp, ws, [
+        (1, 1000, 4, 8, GROUPED_PRICE_PATTERN),
+        (1, 1000, 8, 10, GROUPED_PNL_PATTERN),
+    ])
 
 def export_trade_to_sheet(position: dict, pnl: float, close_price: float, symbol: str):
     sp = _get_spreadsheet()
@@ -135,7 +200,7 @@ def export_trade_to_sheet(position: dict, pnl: float, close_price: float, symbol
             sl,
             tp,
             round(pnl, 4),
-            f"{roi_pct}%",
+            round(roi_pct, 4),
             duration_mins,
             result,
             quality,
@@ -143,7 +208,8 @@ def export_trade_to_sheet(position: dict, pnl: float, close_price: float, symbol
             expected_rr
         ]
         
-        ws.append_row(row_data)
+        ws.append_row(row_data, value_input_option="USER_ENTERED")
+        _format_sheet1_trade_log(sp, ws)
         print(f"[GSHEETS] Đã đồng bộ lệnh {label} ({symbol}) lên Google Sheet.")
         appended_ok = append_trade_and_pnl_history_row(row_data)
         if not appended_ok:
@@ -159,7 +225,24 @@ def _to_float(value, default=0.0):
         if value is None:
             return default
         if isinstance(value, str):
-            cleaned = value.replace("%", "").replace(",", "").strip()
+            cleaned = value.replace("%", "").strip().replace(" ", "")
+            if not cleaned:
+                return default
+            last_dot = cleaned.rfind(".")
+            last_comma = cleaned.rfind(",")
+            if last_dot >= 0 and last_comma >= 0:
+                if last_comma > last_dot:
+                    cleaned = cleaned.replace(".", "").replace(",", ".")
+                else:
+                    cleaned = cleaned.replace(",", "")
+            elif last_comma >= 0:
+                # Dạng 12,34 là thập phân; dạng 1,234 là phân tách hàng nghìn.
+                if len(cleaned) - last_comma - 1 in {1, 2}:
+                    cleaned = cleaned.replace(",", ".")
+                else:
+                    cleaned = cleaned.replace(",", "")
+            elif last_dot >= 0 and len(cleaned) - last_dot - 1 == 3 and cleaned.count(".") >= 1:
+                cleaned = cleaned.replace(".", "")
             return float(cleaned) if cleaned else default
         return float(value)
     except Exception:
@@ -387,7 +470,7 @@ def append_trade_and_pnl_history_row(history_row: list):
             be += 1
         win_rate = (wins / trade_no) * 100.0
 
-        trade_ws.append_row([trade_no] + history_row)
+        trade_ws.append_row([trade_no] + history_row, value_input_option="USER_ENTERED")
         pnl_ws.append_row([
             trade_no,
             history_row[0],
@@ -397,7 +480,9 @@ def append_trade_and_pnl_history_row(history_row: list):
             wins,
             losses,
             be,
-        ])
+        ], value_input_option="USER_ENTERED")
+        _format_trade_history_sheet(sp, trade_ws)
+        _format_pnl_history_sheet(sp, pnl_ws)
         return True
     except Exception as e:
         print(f"[WARN] append_trade_and_pnl_history_row lỗi: {e}")
@@ -511,7 +596,7 @@ def rebuild_trade_and_pnl_history(history_sheet_name: str = "Sheet1",
                 t["sl"],
                 t["tp"],
                 round(pnl, 6),
-                f"{t['roi_pct']:.4f}%",
+                round(float(t["roi_pct"]), 4),
                 t["duration_mins"],
                 t["result"],
                 t["quality"],
@@ -531,8 +616,10 @@ def rebuild_trade_and_pnl_history(history_sheet_name: str = "Sheet1",
 
         trade_ws.clear()
         pnl_ws.clear()
-        trade_ws.update(trade_rows, "A1")
-        pnl_ws.update(pnl_rows, "A1")
+        trade_ws.update(trade_rows, "A1", value_input_option="USER_ENTERED")
+        pnl_ws.update(pnl_rows, "A1", value_input_option="USER_ENTERED")
+        _format_trade_history_sheet(sp, trade_ws)
+        _format_pnl_history_sheet(sp, pnl_ws)
         print(f"[GSHEETS] Rebuilt Trade_History ({len(trades)} dòng) và PnL_History từ Sheet1.")
     except Exception as e:
         print(f"[WARN] rebuild_trade_and_pnl_history lỗi: {e}")
@@ -667,7 +754,7 @@ def update_profit_summary_sheet(history_sheet_name: str = "Sheet1", summary_shee
             summary_rows.append([w, n, round(pnl_sum, 6), round(avg, 6), round(wr, 3)])
 
         summary_ws.clear()
-        summary_ws.update(summary_rows, "A1")
+        summary_ws.update(summary_rows, "A1", value_input_option="USER_ENTERED")
 
         daily_header_idx = 20
         daily_start_idx = daily_header_idx + 1
@@ -747,6 +834,11 @@ def update_profit_summary_sheet(history_sheet_name: str = "Sheet1", summary_shee
                 }
             },
         ]
+        fmt_requests.extend([
+            _number_format_request(summary_ws.id, 2, 19, 1, 2, GROUPED_PNL_PATTERN),
+            _number_format_request(summary_ws.id, 22, 22 + len(daily_rows[-30:]), 1, 5, GROUPED_PNL_PATTERN),
+            _number_format_request(summary_ws.id, weekly_header_idx + 3, weekly_header_idx + 3 + len(weekly_rows[-16:]), 1, 5, GROUPED_PNL_PATTERN),
+        ])
         sp.batch_update({"requests": fmt_requests})
 
         print(f"[GSHEETS] Đã cập nhật sheet {summary_sheet_name} ({total_trades} trades).")
@@ -788,12 +880,13 @@ def export_active_positions(active_positions_by_symbol: dict, latest_prices: dic
                     
                 rows.append([
                     symbol, label, side, mode, entry, live_price, sl, tp, 
-                    round(pnl, 4), f"{round(roi_pct, 2)}%", time_str
+                    round(pnl, 4), round(roi_pct, 4), time_str
                 ])
                 
         ws.clear()
         if len(rows) > 0:
-            ws.update(rows, 'A1')
+            ws.update(rows, 'A1', value_input_option="USER_ENTERED")
+            _format_active_positions_sheet(_get_spreadsheet(), ws)
             
     except Exception as e:
         print(f"[WARN] export_active_positions lỗi: {e}")
@@ -1244,21 +1337,21 @@ def setup_dashboard():
             {
                 "repeatCell": {
                     "range": {"sheetId": ws.id, "startRowIndex": 4, "endRowIndex": 9, "startColumnIndex": 1, "endColumnIndex": 2},
-                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0000"}}},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": GROUPED_NUMBER_PATTERN}}},
                     "fields": "userEnteredFormat.numberFormat",
                 }
             },
             {
                 "repeatCell": {
                     "range": {"sheetId": ws.id, "startRowIndex": 11, "endRowIndex": 42, "startColumnIndex": 1, "endColumnIndex": 2},
-                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0000"}}},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": GROUPED_NUMBER_PATTERN}}},
                     "fields": "userEnteredFormat.numberFormat",
                 }
             },
             {
                 "repeatCell": {
                     "range": {"sheetId": ws.id, "startRowIndex": 11, "endRowIndex": 28, "startColumnIndex": 4, "endColumnIndex": 5},
-                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0000"}}},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": GROUPED_NUMBER_PATTERN}}},
                     "fields": "userEnteredFormat.numberFormat",
                 }
             },

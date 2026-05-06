@@ -8,8 +8,8 @@
       <tbody>
       {% for p in running_positions %}
       <tr>
-        <td>{{ p.symbol }}</td><td>{{ p.label }}</td><td>{{ p.side }}</td><td>{{ p.mode }}</td><td>{{ p.entry }}</td><td>{{ p.live_price }}</td>
-        <td>{{ p.sl }}</td><td>{{ p.tp }}</td><td class="{% if p.pnl>0 %}green{% elif p.pnl<0 %}red{% endif %}">{{ p.pnl }}</td><td>{{ p.roi_pct }}</td><td>{{ p.time_opened }}</td>
+        <td>{{ p.symbol }}</td><td>{{ p.label }}</td><td>{{ p.side }}</td><td>{{ p.mode }}</td><td>{{ p.entry|num(2) }}</td><td>{{ p.live_price|num(2) }}</td>
+        <td>{{ p.sl|num(2) }}</td><td>{{ p.tp|num(2) }}</td><td class="{% if p.pnl>0 %}green{% elif p.pnl<0 %}red{% endif %}">{{ p.pnl|num(4) }}</td><td>{{ p.roi_pct|num(2) }}%</td><td>{{ p.time_opened }}</td>
       </tr>
       {% endfor %}
       </tbody>

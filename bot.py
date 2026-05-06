@@ -20,7 +20,7 @@ from config import (
 
 # Helpers
 from utils import (
-    now_vn, format_price, build_telegram_dedup_keys,
+    now_vn, format_price, format_number, build_telegram_dedup_keys,
     normalize_tp_sl_by_entry, align_tp_sl_with_rr, enforce_tp_sl_safety,
     sanitize_tp_sl, is_entry_still_valid, is_signal_tradeable, calc_order_quantity, calc_rr_from_levels
 )
@@ -63,6 +63,12 @@ from learning import apply_learning_to_signal_v2, update_learning_state
 # 0. SERVER HEALTHCHECK (FLASK)
 # ==========================================
 app = Flask(__name__)
+
+
+@app.template_filter("num")
+def format_number_filter(value, max_decimals=4):
+    return format_number(value, max_decimals=max_decimals)
+
 
 @app.route("/")
 def health_check():

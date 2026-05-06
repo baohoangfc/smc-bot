@@ -3,19 +3,19 @@
 <div class="table-card">
   <h3>Tổng hợp theo ngày</h3>
   <table><thead><tr><th>Ngày</th><th>Trades</th><th>Net PnL</th><th>Winrate</th></tr></thead><tbody>
-  {% for r in analytics.day|reverse %}<tr><td>{{ r.period }}</td><td>{{ r.trades }}</td><td class="{% if r.net_pnl>0 %}green{% elif r.net_pnl<0 %}red{% endif %}">{{ r.net_pnl }}</td><td>{{ r.win_rate }}%</td></tr>{% endfor %}
+  {% for r in analytics.day|reverse %}<tr><td>{{ r.period }}</td><td>{{ r.trades|num(0) }}</td><td class="{% if r.net_pnl>0 %}green{% elif r.net_pnl<0 %}red{% endif %}">{{ r.net_pnl|num(4) }}</td><td>{{ r.win_rate|num(2) }}%</td></tr>{% endfor %}
   </tbody></table>
 </div>
 <div class="table-card">
   <h3>Tổng hợp theo tháng</h3>
   <table><thead><tr><th>Tháng</th><th>Trades</th><th>Net PnL</th><th>Winrate</th></tr></thead><tbody>
-  {% for r in analytics.month|reverse %}<tr><td>{{ r.period }}</td><td>{{ r.trades }}</td><td class="{% if r.net_pnl>0 %}green{% elif r.net_pnl<0 %}red{% endif %}">{{ r.net_pnl }}</td><td>{{ r.win_rate }}%</td></tr>{% endfor %}
+  {% for r in analytics.month|reverse %}<tr><td>{{ r.period }}</td><td>{{ r.trades|num(0) }}</td><td class="{% if r.net_pnl>0 %}green{% elif r.net_pnl<0 %}red{% endif %}">{{ r.net_pnl|num(4) }}</td><td>{{ r.win_rate|num(2) }}%</td></tr>{% endfor %}
   </tbody></table>
 </div>
 <div class="table-card">
   <h3>Tổng hợp theo năm</h3>
   <table><thead><tr><th>Năm</th><th>Trades</th><th>Net PnL</th><th>Winrate</th></tr></thead><tbody>
-  {% for r in analytics.year|reverse %}<tr><td>{{ r.period }}</td><td>{{ r.trades }}</td><td class="{% if r.net_pnl>0 %}green{% elif r.net_pnl<0 %}red{% endif %}">{{ r.net_pnl }}</td><td>{{ r.win_rate }}%</td></tr>{% endfor %}
+  {% for r in analytics.year|reverse %}<tr><td>{{ r.period }}</td><td>{{ r.trades|num(0) }}</td><td class="{% if r.net_pnl>0 %}green{% elif r.net_pnl<0 %}red{% endif %}">{{ r.net_pnl|num(4) }}</td><td>{{ r.win_rate|num(2) }}%</td></tr>{% endfor %}
   </tbody></table>
 </div>
 {% endblock %}

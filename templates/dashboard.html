@@ -1,14 +1,14 @@
 {% extends 'base_readonly.html' %}
 {% block content %}
 <div class="cards">
-  <div class="card"><div class="label">Tổng lệnh</div><div class="value">{{ dashboard.metrics.total_trades }}</div></div>
-  <div class="card"><div class="label">Win / Loss / BE</div><div class="value">{{ dashboard.metrics.wins }} / {{ dashboard.metrics.losses }} / {{ dashboard.metrics.breakeven }}</div></div>
-  <div class="card"><div class="label">Win rate</div><div class="value">{{ dashboard.metrics.win_rate }}%</div></div>
-  <div class="card"><div class="label">Net PnL</div><div class="value {% if dashboard.metrics.net_pnl > 0 %}green{% elif dashboard.metrics.net_pnl < 0 %}red{% endif %}">{{ dashboard.metrics.net_pnl }}</div></div>
-  <div class="card"><div class="label">Balance / Equity</div><div class="value">{{ dashboard.metrics.wallet_balance }} / {{ dashboard.metrics.wallet_equity }}</div></div>
-  <div class="card"><div class="label">Available / Used</div><div class="value">{{ dashboard.metrics.wallet_available }} / {{ dashboard.metrics.wallet_used_margin }}</div></div>
-  <div class="card"><div class="label">Lệnh đang chạy</div><div class="value">{{ dashboard.metrics.running_positions }}</div></div>
-  <div class="card"><div class="label">PnL chạy (+ / - / tổng)</div><div class="value"><span class="green">{{ dashboard.metrics.running_pnl_positive }}</span> / <span class="red">{{ dashboard.metrics.running_pnl_negative }}</span> / {{ dashboard.metrics.running_pnl_total }}</div></div>
+  <div class="card"><div class="label">Tổng lệnh</div><div class="value">{{ dashboard.metrics.total_trades|num(0) }}</div></div>
+  <div class="card"><div class="label">Win / Loss / BE</div><div class="value">{{ dashboard.metrics.wins|num(0) }} / {{ dashboard.metrics.losses|num(0) }} / {{ dashboard.metrics.breakeven|num(0) }}</div></div>
+  <div class="card"><div class="label">Win rate</div><div class="value">{{ dashboard.metrics.win_rate|num(2) }}%</div></div>
+  <div class="card"><div class="label">Net PnL</div><div class="value {% if dashboard.metrics.net_pnl > 0 %}green{% elif dashboard.metrics.net_pnl < 0 %}red{% endif %}">{{ dashboard.metrics.net_pnl|num(4) }}</div></div>
+  <div class="card"><div class="label">Balance / Equity</div><div class="value">{{ dashboard.metrics.wallet_balance|num(4) }} / {{ dashboard.metrics.wallet_equity|num(4) }}</div></div>
+  <div class="card"><div class="label">Available / Used</div><div class="value">{{ dashboard.metrics.wallet_available|num(4) }} / {{ dashboard.metrics.wallet_used_margin|num(4) }}</div></div>
+  <div class="card"><div class="label">Lệnh đang chạy</div><div class="value">{{ dashboard.metrics.running_positions|num(0) }}</div></div>
+  <div class="card"><div class="label">PnL chạy (+ / - / tổng)</div><div class="value"><span class="green">{{ dashboard.metrics.running_pnl_positive|num(4) }}</span> / <span class="red">{{ dashboard.metrics.running_pnl_negative|num(4) }}</span> / {{ dashboard.metrics.running_pnl_total|num(4) }}</div></div>
 </div>
 
 <div class="table-card">
@@ -20,7 +20,7 @@
         {% for t in dashboard.trades %}
         <tr>
           <td>{{ t.time_close }}</td><td>{{ t.label }}</td><td>{{ t.symbol }}</td><td>{{ t.side }}</td>
-          <td class="{% if t.pnl>0 %}green{% elif t.pnl<0 %}red{% endif %}">{{ t.pnl }}</td><td>{{ t.roi_pct }}</td><td>{{ t.result }}</td>
+          <td class="{% if t.pnl>0 %}green{% elif t.pnl<0 %}red{% endif %}">{{ t.pnl|num(4) }}</td><td>{{ t.roi_pct|num(2) }}%</td><td>{{ t.result }}</td>
         </tr>
         {% endfor %}
       </tbody>
