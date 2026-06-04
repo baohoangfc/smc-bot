@@ -11,8 +11,8 @@ from flask import Flask, jsonify, render_template, request
 from config import (
     SYMBOLS, SIGNAL_INTERVALS, SCALP_INTERVALS, SWING_INTERVALS,
     GRID_BOT_ENABLED, GRID_INTERVAL, GRID_MIN_CANDLES,
-    INTERVAL, DATA_SOURCE, MARGIN_STANDARD, MARGIN_HIGH_QUALITY, HIGH_QUALITY_THRESHOLD,
-    LEVERAGE, RR, MIN_TP_PCT, MIN_SL_PCT,
+    INTERVAL, DATA_SOURCE, MARGIN_STANDARD, MARGIN_HIGH_QUALITY,
+    LEVERAGE,
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
     STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT,
@@ -22,7 +22,8 @@ from config import (
 from utils import (
     now_vn, format_price, format_number, build_telegram_dedup_keys,
     normalize_tp_sl_by_entry, align_tp_sl_with_rr, enforce_tp_sl_safety,
-    sanitize_tp_sl, is_entry_still_valid, is_signal_tradeable, calc_order_quantity, calc_rr_from_levels
+    sanitize_tp_sl, is_entry_still_valid, is_signal_tradeable, calc_order_quantity,
+    calc_rr_from_levels, calc_risk_adjusted_margin
 )
 
 # Client giao dịch API
@@ -487,17 +488,37 @@ while True:
                         order_signal["rr"] = effective_rr
 
                     quality_tier = order_signal.get("quality_tier", signal.get("quality_tier", "standard"))
-                    if quality_tier == "premium":
-                        used_margin = MARGIN_HIGH_QUALITY
-                    elif quality_tier == "high":
-                        used_margin = (MARGIN_STANDARD + MARGIN_HIGH_QUALITY) / 2.0
-                    else:
-                        used_margin = MARGIN_STANDARD
                     order_signal["quality_tier"] = quality_tier
+                    post_tradeable, post_tradeable_reason = is_signal_tradeable(order_signal)
+                    if not post_tradeable:
+                        last_skip_reason_by_symbol[symbol] = f"Bỏ qua sau chuẩn hoá TP/SL: {post_tradeable_reason}"
+                        print(f"[INFO] [{symbol}] Bỏ qua sau chuẩn hoá TP/SL: {post_tradeable_reason}")
+                        continue
+
+                    if quality_tier == "premium":
+                        base_margin = MARGIN_HIGH_QUALITY
+                    elif quality_tier == "high":
+                        base_margin = (MARGIN_STANDARD + MARGIN_HIGH_QUALITY) / 2.0
+                    else:
+                        base_margin = MARGIN_STANDARD
+                    used_margin, sizing_reason = calc_risk_adjusted_margin(
+                        vst_bal, last_price, order_signal.get("sl"), LEVERAGE,
+                        quality_tier=quality_tier, base_margin=base_margin
+                    )
                     order_signal["margin"] = used_margin
+                    order_signal["sizing_reason"] = sizing_reason
+                    if used_margin <= 0:
+                        last_skip_reason_by_symbol[symbol] = sizing_reason
+                        print(f"[INFO] [{symbol}] Bỏ qua đặt lệnh: {sizing_reason}")
+                        continue
                     notional = used_margin * LEVERAGE
+                    print(f"[{symbol}] Position sizing: {sizing_reason}")
                     
                     quantity = calc_order_quantity(last_price, notional)
+                    if quantity <= 0:
+                        last_skip_reason_by_symbol[symbol] = "Quantity tính ra <= 0 sau risk sizing."
+                        print(f"[INFO] [{symbol}] Bỏ qua đặt lệnh: quantity <= 0")
+                        continue
                     order = bing_client.place_market_order(
                         symbol, "BUY" if signal['side'] == 'LONG' else "SELL", signal['side'], quantity,
                         order_signal['tp'], order_signal['sl']
