@@ -183,14 +183,17 @@ def scan_signal_strict(df: pd.DataFrame, symbol_frames: dict = None, current_tf:
         elif (bullish_bias and htf_trend == "BULLISH") or (bearish_bias and htf_trend == "BEARISH"):
             quality_score += 0.4
 
+    htf_long_ok = htf_trend in (None, "BULLISH", "SIDEWAY")
+    htf_short_ok = htf_trend in (None, "BEARISH", "SIDEWAY")
+
     long_strict   = bullish_bias and liquidity_sweep_low  and (mss_bull or mss_bull_lite)
     short_strict  = bearish_bias and liquidity_sweep_high and (mss_bear or mss_bear_lite)
-    long_smc_lite = bullish_bias and (mss_bull or mss_bull_lite) and (liquidity_sweep_low or in_discount)
-    short_smc_lite = bearish_bias and (mss_bear or mss_bear_lite) and (liquidity_sweep_high or in_premium)
+    long_smc_lite = htf_long_ok and bullish_bias and (mss_bull or mss_bull_lite) and (liquidity_sweep_low or in_discount)
+    short_smc_lite = htf_short_ok and bearish_bias and (mss_bear or mss_bear_lite) and (liquidity_sweep_high or in_premium)
 
     near_ema50 = abs(close_price - ema50) <= max(0.5, close_price * 0.0035)
-    long_fallback  = ALLOW_FALLBACK_SIGNAL and bullish_bias and (mss_bull or mss_bull_lite) and near_ema50
-    short_fallback = ALLOW_FALLBACK_SIGNAL and bearish_bias and (mss_bear or mss_bear_lite) and near_ema50
+    long_fallback  = ALLOW_FALLBACK_SIGNAL and htf_long_ok and bullish_bias and (mss_bull or mss_bull_lite) and near_ema50
+    short_fallback = ALLOW_FALLBACK_SIGNAL and htf_short_ok and bearish_bias and (mss_bear or mss_bear_lite) and near_ema50
 
     allow_long = long_strict or (long_smc_lite and quality_score >= SCALP_MIN_QUALITY_SCORE) or \
                  (long_fallback and quality_score >= (SCALP_MIN_QUALITY_SCORE + 0.2))

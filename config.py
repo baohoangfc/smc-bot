@@ -48,7 +48,11 @@ VALID_INTERVALS     = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 RR                  = float(os.environ.get("RR", "2.0"))
 MARGIN_STANDARD     = float(os.environ.get("MARGIN_STANDARD", "25.0"))
 MARGIN_HIGH_QUALITY = float(os.environ.get("MARGIN_HIGH_QUALITY", "50.0"))
-HIGH_QUALITY_THRESHOLD = float(os.environ.get("HIGH_QUALITY_THRESHOLD", "3.0"))
+MIN_MARGIN_PER_TRADE = float(os.environ.get("MIN_MARGIN_PER_TRADE", "8.0"))
+MAX_MARGIN_PER_TRADE = float(os.environ.get("MAX_MARGIN_PER_TRADE", str(MARGIN_HIGH_QUALITY)))
+RISK_PCT_STANDARD   = float(os.environ.get("RISK_PCT_STANDARD", "0.35"))
+RISK_PCT_HIGH       = float(os.environ.get("RISK_PCT_HIGH", "0.50"))
+RISK_PCT_PREMIUM    = float(os.environ.get("RISK_PCT_PREMIUM", "0.70"))
 LEVERAGE            = int(os.environ.get("LEVERAGE", "100"))
 MAX_ACTIVE_ORDERS   = int(os.environ.get("MAX_ACTIVE_ORDERS", "3"))
 MIN_TP_PCT          = float(os.environ.get("MIN_TP_PCT", "0.20"))
@@ -75,10 +79,15 @@ MIN_RISK_PCT     = float(os.environ.get("MIN_RISK_PCT", "0.15"))
 MIN_ATR_PCT      = float(os.environ.get("MIN_ATR_PCT", "0.03"))
 TREND_LOOKBACK   = int(os.environ.get("TREND_LOOKBACK", "20"))
 MIN_ORDER_RR     = float(os.environ.get("MIN_ORDER_RR", "1.0"))
+MIN_NET_RR_AFTER_FEES = float(os.environ.get("MIN_NET_RR_AFTER_FEES", "0.60"))
+MAX_SL_PCT_STANDARD = float(os.environ.get("MAX_SL_PCT_STANDARD", "1.20"))
+MAX_SL_PCT_HIGH     = float(os.environ.get("MAX_SL_PCT_HIGH", "1.60"))
+MAX_SL_PCT_PREMIUM  = float(os.environ.get("MAX_SL_PCT_PREMIUM", "2.00"))
 SWING_RR_TARGET  = float(os.environ.get("SWING_RR_TARGET", "2.4"))
 
 # ===================== Entry / Drift =====================
-ENTRY_DRIFT_MAX_PCT        = float(os.environ.get("ENTRY_DRIFT_MAX_PCT", "1.0"))
+ENTRY_DRIFT_MAX_PCT        = float(os.environ.get("ENTRY_DRIFT_MAX_PCT", "0.60"))
+ENTRY_DRIFT_MIN_PCT        = float(os.environ.get("ENTRY_DRIFT_MIN_PCT", "0.15"))
 ENTRY_DRIFT_RISK_FRACTION  = float(os.environ.get("ENTRY_DRIFT_RISK_FRACTION", "0.6"))
 
 # ===================== Signal Engine =====================
@@ -86,13 +95,14 @@ ALLOW_FALLBACK_SIGNAL          = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true")
 FALLBACK_REQUIRE_HIGH_LIQUIDITY = os.environ.get("FALLBACK_REQUIRE_HIGH_LIQUIDITY", "true").lower() == "true"
 READ_ONLY_MODE  = os.environ.get("READ_ONLY_MODE", "false").lower() == "true"
 SIGNAL_ENGINE   = os.environ.get("SIGNAL_ENGINE", "auto").lower()  # auto | strict | backtest_v5
-SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "90"))
+SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "180"))
 
 # ===================== Breakeven =====================
 BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
 BE_OFFSET_PCT  = float(os.environ.get("BE_OFFSET_PCT", "0.05"))
 BE_INCLUDE_FEES = os.environ.get("BE_INCLUDE_FEES", "true").lower() == "true"
 TAKER_FEE_PCT   = float(os.environ.get("TAKER_FEE_PCT", "0.05"))
+SKIP_IF_RISK_CAP_BELOW_MIN_MARGIN = os.environ.get("SKIP_IF_RISK_CAP_BELOW_MIN_MARGIN", "true").lower() == "true"
 
 # ===================== Partial Take Profit =====================
 PARTIAL_TP_ROI_THRESHOLD = float(os.environ.get("PARTIAL_TP_ROI_THRESHOLD", "100.0"))
@@ -100,20 +110,20 @@ PARTIAL_TP_QUANTITY_FRACTION = float(os.environ.get("PARTIAL_TP_QUANTITY_FRACTIO
 
 # ===================== Trailing Stop Loss =====================
 TSL_ENABLED        = os.environ.get("TSL_ENABLED", "true").lower() == "true"
-TSL_ACTIVATION_PCT = float(os.environ.get("TSL_ACTIVATION_PCT", "50.0"))  # % progress to TP to start trailing
+TSL_ACTIVATION_PCT = float(os.environ.get("TSL_ACTIVATION_PCT", "45.0"))  # % progress to TP to start trailing
 TSL_TRAIL_PCT      = float(os.environ.get("TSL_TRAIL_PCT", "0.15"))        # % trail distance from peak
 
 # ===================== Liquidity Windows =====================
 LIQUIDITY_FOCUS_ENABLED    = os.environ.get("LIQUIDITY_FOCUS_ENABLED", "true").lower() == "true"
 LIQUIDITY_FOCUS_MODE       = os.environ.get("LIQUIDITY_FOCUS_MODE", "soft").lower()  # soft | strict
 LIQUIDITY_WINDOWS_VN_RAW   = os.environ.get("LIQUIDITY_WINDOWS_VN", "14-17,19-23")
-LIQUIDITY_SOFT_MIN_RR      = float(os.environ.get("LIQUIDITY_SOFT_MIN_RR", "1.30"))
-LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", "2.20"))
+LIQUIDITY_SOFT_MIN_RR      = float(os.environ.get("LIQUIDITY_SOFT_MIN_RR", "1.40"))
+LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", "2.35"))
 HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS", str(MAX_ACTIVE_ORDERS + 1)))
 LOW_LIQUIDITY_MAX_ACTIVE_ORDERS  = int(os.environ.get("LOW_LIQUIDITY_MAX_ACTIVE_ORDERS", str(max(1, MAX_ACTIVE_ORDERS - 1))))
 
 # ===================== Grid Bot =====================
-GRID_BOT_ENABLED    = os.environ.get("GRID_BOT_ENABLED", "true").lower() == "true"
+GRID_BOT_ENABLED    = os.environ.get("GRID_BOT_ENABLED", "false").lower() == "true"
 GRID_INTERVAL       = os.environ.get("GRID_INTERVAL", "1m").lower()
 GRID_ANCHOR_WINDOW  = int(os.environ.get("GRID_ANCHOR_WINDOW", "34"))
 GRID_LEVELS         = int(os.environ.get("GRID_LEVELS", "5"))

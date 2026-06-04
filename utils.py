@@ -13,8 +13,10 @@ import numpy as np
 from config import (
     RR, MIN_TP_PCT, MIN_SL_PCT, SCALP_RR_MIN, SCALP_RR_MAX_HIGH_QUALITY,
     SCALP_RR_MAX_MED_QUALITY, QUALITY_HIGH_THRESHOLD, QUALITY_MED_THRESHOLD,
-    ENTRY_DRIFT_MAX_PCT, ENTRY_DRIFT_RISK_FRACTION, MIN_ORDER_RR,
-    TELEGRAM_DEDUP_WINDOW_SECONDS,
+    ENTRY_DRIFT_MAX_PCT, ENTRY_DRIFT_MIN_PCT, ENTRY_DRIFT_RISK_FRACTION, MIN_ORDER_RR,
+    MIN_NET_RR_AFTER_FEES, MAX_SL_PCT_STANDARD, MAX_SL_PCT_HIGH, MAX_SL_PCT_PREMIUM,
+    MIN_MARGIN_PER_TRADE, MAX_MARGIN_PER_TRADE, RISK_PCT_STANDARD, RISK_PCT_HIGH, RISK_PCT_PREMIUM,
+    TAKER_FEE_PCT, SKIP_IF_RISK_CAP_BELOW_MIN_MARGIN, TELEGRAM_DEDUP_WINDOW_SECONDS,
 )
 
 
@@ -99,6 +101,94 @@ def calc_rr_from_levels(side, entry, tp, sl):
     if risk <= 0 or reward <= 0:
         return None
     return reward / risk
+
+
+
+
+def calc_sl_distance_pct(side, entry, sl):
+    """Tính khoảng cách SL theo % entry; trả None nếu SL sai phía hoặc thiếu dữ liệu."""
+    try:
+        e = float(entry)
+        stop_loss = float(sl)
+    except Exception:
+        return None
+    if e <= 0:
+        return None
+    if side == "LONG":
+        distance = e - stop_loss
+    else:
+        distance = stop_loss - e
+    if distance <= 0:
+        return None
+    return (distance / e) * 100.0
+
+
+def get_max_sl_pct_for_tier(quality_tier="standard"):
+    tier = str(quality_tier or "standard").lower()
+    if tier == "premium":
+        return max(float(MAX_SL_PCT_PREMIUM), float(MAX_SL_PCT_HIGH), float(MAX_SL_PCT_STANDARD))
+    if tier == "high":
+        return max(float(MAX_SL_PCT_HIGH), float(MAX_SL_PCT_STANDARD))
+    return float(MAX_SL_PCT_STANDARD)
+
+
+def calc_net_rr_after_fees(side, entry, tp, sl, taker_fee_pct=None):
+    """
+    Ước lượng RR sau phí taker 2 chiều. Công thức bảo thủ để lọc lệnh có reward quá mỏng so với phí.
+    """
+    gross_rr = calc_rr_from_levels(side, entry, tp, sl)
+    risk_pct = calc_sl_distance_pct(side, entry, sl)
+    if gross_rr is None or risk_pct is None or risk_pct <= 0:
+        return None
+    fee_pct = float(TAKER_FEE_PCT if taker_fee_pct is None else taker_fee_pct)
+    fee_rr_cost = (2.0 * fee_pct) / risk_pct
+    return gross_rr - fee_rr_cost
+
+
+def calc_risk_adjusted_margin(balance, entry, sl, leverage, quality_tier="standard", base_margin=None):
+    """
+    Position sizing theo rủi ro tài khoản: loss tại SL ≈ balance * risk_pct_by_tier.
+    Margin vẫn bị chặn bởi base_margin/tier cap để không tăng size quá mạnh khi SL hẹp.
+    """
+    try:
+        bal = float(balance)
+        e = float(entry)
+        stop_loss = float(sl)
+        lev = max(float(leverage or 1), 1.0)
+    except Exception:
+        return 0.0, "skip: dữ liệu sizing không hợp lệ"
+    if bal <= 0 or e <= 0 or stop_loss <= 0:
+        return 0.0, "skip: thiếu balance/entry/SL"
+
+    tier = str(quality_tier or "standard").lower()
+    risk_pct_map = {
+        "premium": float(RISK_PCT_PREMIUM),
+        "high": float(RISK_PCT_HIGH),
+        "standard": float(RISK_PCT_STANDARD),
+    }
+    account_risk_pct = risk_pct_map.get(tier, float(RISK_PCT_STANDARD))
+    price_risk_pct = abs(e - stop_loss) / e * 100.0
+    if price_risk_pct <= 0:
+        return 0.0, "skip: SL distance không hợp lệ"
+
+    risk_budget_usdt = bal * (account_risk_pct / 100.0)
+    raw_margin = risk_budget_usdt / (lev * (price_risk_pct / 100.0))
+    min_margin = max(float(MIN_MARGIN_PER_TRADE), 0.0)
+    tier_cap = min(float(base_margin or MAX_MARGIN_PER_TRADE), float(MAX_MARGIN_PER_TRADE))
+    if tier_cap <= 0:
+        return 0.0, "skip: margin cap không hợp lệ"
+    if raw_margin < min_margin and SKIP_IF_RISK_CAP_BELOW_MIN_MARGIN:
+        return 0.0, (
+            f"skip: risk cap chỉ cho phép margin=${raw_margin:.2f} < min=${min_margin:.2f}; "
+            f"SL={price_risk_pct:.3f}%, risk_budget=${risk_budget_usdt:.2f}"
+        )
+    capped_margin = min(raw_margin, tier_cap)
+    final_margin = min(max(min_margin, capped_margin), tier_cap)
+    reason = (
+        f"risk-size {tier}: risk_budget=${risk_budget_usdt:.2f} "
+        f"({account_risk_pct:.2f}% balance), SL={price_risk_pct:.3f}%, margin=${final_margin:.2f}"
+    )
+    return round(max(final_margin, 0.0), 2), reason
 
 
 def format_rr_text(side, entry, tp, sl, fallback_rr=None, decimals=2):
@@ -222,8 +312,9 @@ def get_entry_drift_limit_pct(signal, max_drift_pct=None):
         return cap_pct
     risk_pct = abs(entry - sl) / entry * 100.0
     risk_based_pct = risk_pct * max(float(ENTRY_DRIFT_RISK_FRACTION), 0.0)
-    # Cấu hình để luôn cho phép sai lệch ít nhất là cap_pct (ví dụ 1.0%)
-    return max(cap_pct, risk_based_pct)
+    # ENTRY_DRIFT_MAX_PCT là trần thật sự; risk-based chỉ nới trong phạm vi trần này.
+    floor_pct = max(float(ENTRY_DRIFT_MIN_PCT), 0.0)
+    return min(cap_pct, max(floor_pct, risk_based_pct))
 
 
 def is_entry_still_valid(signal, live_price, max_drift_pct=None):
@@ -245,6 +336,8 @@ def is_signal_tradeable(signal):
     entry = signal.get("entry")
     tp    = signal.get("tp")
     sl    = signal.get("sl")
+    if entry is None or tp is None or sl is None:
+        return False, "Thiếu entry/TP/SL"
     rr    = calc_rr_from_levels(side, entry, tp, sl)
     if rr is None:
         rr = float(signal.get("rr", 0) or 0)
@@ -252,9 +345,20 @@ def is_signal_tradeable(signal):
         return False, "RR không hợp lệ"
     if rr < MIN_ORDER_RR:
         return False, f"RR thấp ({rr:.2f} < {MIN_ORDER_RR:.2f})"
-    if entry is None or tp is None or sl is None:
-        return False, "Thiếu entry/TP/SL"
-    return True, f"RR={rr:.2f}"
+
+    quality_tier = signal.get("quality_tier", "standard")
+    sl_pct = calc_sl_distance_pct(side, entry, sl)
+    if sl_pct is None:
+        return False, "SL không hợp lệ hoặc sai phía"
+    max_sl_pct = get_max_sl_pct_for_tier(quality_tier)
+    if sl_pct > max_sl_pct:
+        return False, f"SL quá rộng ({sl_pct:.2f}% > {max_sl_pct:.2f}% cho tier {quality_tier})"
+
+    net_rr = calc_net_rr_after_fees(side, entry, tp, sl)
+    if net_rr is not None and net_rr < MIN_NET_RR_AFTER_FEES:
+        return False, f"Net RR sau phí thấp ({net_rr:.2f} < {MIN_NET_RR_AFTER_FEES:.2f})"
+    net_rr_text = f"{net_rr:.2f}" if net_rr is not None else "N/A"
+    return True, f"RR={rr:.2f}, NetRR≈{net_rr_text}, SL={sl_pct:.2f}%"
 
 
 def calc_order_quantity(entry_price, notional_usdt):
