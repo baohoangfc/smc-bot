@@ -90,6 +90,34 @@ ENTRY_DRIFT_MAX_PCT        = float(os.environ.get("ENTRY_DRIFT_MAX_PCT", "0.60")
 ENTRY_DRIFT_MIN_PCT        = float(os.environ.get("ENTRY_DRIFT_MIN_PCT", "0.15"))
 ENTRY_DRIFT_RISK_FRACTION  = float(os.environ.get("ENTRY_DRIFT_RISK_FRACTION", "0.6"))
 
+
+# ===================== Gold / XAU Protection =====================
+XAU_GOLD_PROTECTION_ENABLED = os.environ.get("XAU_GOLD_PROTECTION_ENABLED", "true").lower() == "true"
+XAU_GOLD_SYMBOL_KEYWORDS    = tuple(
+    item.strip().upper()
+    for item in os.environ.get("XAU_GOLD_SYMBOL_KEYWORDS", "XAU,XAUT,GOLD").split(",")
+    if item.strip()
+)
+XAU_GOLD_MIN_INTERVAL_MINUTES = int(os.environ.get("XAU_GOLD_MIN_INTERVAL_MINUTES", "15"))
+XAU_GOLD_MAX_ACTIVE_ORDERS    = int(os.environ.get("XAU_GOLD_MAX_ACTIVE_ORDERS", "1"))
+XAU_GOLD_MIN_QUALITY_BONUS    = float(os.environ.get("XAU_GOLD_MIN_QUALITY_BONUS", "0.35"))
+XAU_GOLD_MIN_RR               = float(os.environ.get("XAU_GOLD_MIN_RR", "1.30"))
+XAU_GOLD_MIN_NET_RR_AFTER_FEES = float(os.environ.get("XAU_GOLD_MIN_NET_RR_AFTER_FEES", "0.85"))
+XAU_GOLD_MAX_ENTRY_DRIFT_PCT  = float(os.environ.get("XAU_GOLD_MAX_ENTRY_DRIFT_PCT", "0.25"))
+XAU_GOLD_BLOCK_FALLBACK       = os.environ.get("XAU_GOLD_BLOCK_FALLBACK", "true").lower() == "true"
+XAU_GOLD_BLOCK_GRID           = os.environ.get("XAU_GOLD_BLOCK_GRID", "true").lower() == "true"
+
+
+def is_gold_symbol(symbol: str) -> bool:
+    normalized = (symbol or "").upper().replace("-", "")
+    return any(keyword and keyword in normalized for keyword in XAU_GOLD_SYMBOL_KEYWORDS)
+
+
+def get_entry_drift_max_pct_for_symbol(symbol: str) -> float:
+    if XAU_GOLD_PROTECTION_ENABLED and is_gold_symbol(symbol):
+        return min(float(ENTRY_DRIFT_MAX_PCT), float(XAU_GOLD_MAX_ENTRY_DRIFT_PCT))
+    return float(ENTRY_DRIFT_MAX_PCT)
+
 # ===================== Signal Engine =====================
 ALLOW_FALLBACK_SIGNAL          = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true").lower() == "true"
 FALLBACK_REQUIRE_HIGH_LIQUIDITY = os.environ.get("FALLBACK_REQUIRE_HIGH_LIQUIDITY", "true").lower() == "true"

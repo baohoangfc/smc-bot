@@ -3,7 +3,7 @@
 > Mục tiêu: Tổng hợp trạng thái code mới nhất để Codex có thể đọc nhanh và sửa đúng ngữ cảnh khi có thay đổi.
 
 ## 1) Version snapshot
-- Context version: `v2026.04.03-1`
+- Context version: `v2026.06.05-1`
 - Repo chính hiện tại: `smc-bot`
 - File runtime cốt lõi: `bot.py`
 - Các file hỗ trợ: `requirements.txt`, `Dockerfile`, `railway.toml`, `SMC_AUDIT.md`
@@ -51,10 +51,16 @@
   - Ghi chú thanh khoản (nếu bật `LIQUIDITY_FOCUS_ENABLED` và ngoài khung giờ mạnh)
   - Lý do skip gần nhất (`last_skip_reason_by_symbol`)
 - Điều kiện drift entry đang áp dụng:
-  - Trần drift mặc định `ENTRY_DRIFT_MAX_PCT=0.30` (đơn vị `%`).
+  - Trần drift mặc định `ENTRY_DRIFT_MAX_PCT=0.60` (đơn vị `%`).
   - Nếu tín hiệu có `SL`, bot dùng ngưỡng động: `min(ENTRY_DRIFT_MAX_PCT, risk_pct * ENTRY_DRIFT_RISK_FRACTION)`.
-  - Mặc định `ENTRY_DRIFT_RISK_FRACTION=0.30` để độ lệch entry bám theo độ rộng setup (gần logic invalidation của SMC hơn ngưỡng cứng thuần túy).
+  - Mặc định `ENTRY_DRIFT_RISK_FRACTION=0.60`; riêng XAU/XAUT/GOLD bật `XAU_GOLD_PROTECTION_ENABLED=true` sẽ chặn thêm bằng `XAU_GOLD_MAX_ENTRY_DRIFT_PCT=0.25`.
   - Bot skip khi `drift_pct > drift_limit_pct` (lớn hơn, không phải lớn hơn hoặc bằng).
+- Guard riêng cho XAU/XAUT/GOLD (mặc định bật) để giảm lỗ do nhiễu/đuổi giá:
+  - Chặn tín hiệu dưới `XAU_GOLD_MIN_INTERVAL_MINUTES=15` phút (loại 5m).
+  - Chỉ cho tối đa `XAU_GOLD_MAX_ACTIVE_ORDERS=1` lệnh XAU đang mở.
+  - Yêu cầu quality cao hơn ngưỡng chung thêm `XAU_GOLD_MIN_QUALITY_BONUS=0.35`.
+  - Yêu cầu `XAU_GOLD_MIN_RR=1.30` và `XAU_GOLD_MIN_NET_RR_AFTER_FEES=0.85`.
+  - Mặc định chặn fallback/grid cho XAU bằng `XAU_GOLD_BLOCK_FALLBACK=true`, `XAU_GOLD_BLOCK_GRID=true`.
 - Tần suất noti trạng thái chờ:
   - Giới hạn theo từng symbol (mỗi symbol tối đa 1 lần/giờ khi không có lệnh mở).
   - Nếu chạy nhiều symbol, noti có thể xuất hiện gần nhau theo phút nhưng khác symbol.
