@@ -16,6 +16,7 @@ from config import (
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
     STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT,
+    get_entry_drift_max_pct_for_symbol,
 )
 
 # Helpers
@@ -48,7 +49,7 @@ from position_mgmt import (
     calc_live_pnl, calc_live_pnl_pct, check_breakeven_condition, check_trailing_stop,
     decide_positions_to_close, sync_position_levels_from_exchange, should_notify_pnl_change,
     current_max_active_orders, is_high_liquidity_time, passes_quality_gate,
-    passes_liquidity_focus, effective_signal_cooldown
+    passes_gold_risk_guard, passes_liquidity_focus, effective_signal_cooldown
 )
 
 # Persistence (Lưu trạng thái)
@@ -330,7 +331,7 @@ while True:
                 df_tf = symbol_frames.get(tf)
                 if df_tf is None or len(df_tf) < 3:
                     continue
-                scalp_signal = scan_signal(df_tf, symbol_frames=symbol_frames)
+                scalp_signal = scan_signal(df_tf, symbol_frames=symbol_frames, current_tf=tf)
                 if scalp_signal:
                     scalp_signal = dict(scalp_signal)
                     scalp_signal["interval"] = tf
@@ -342,7 +343,7 @@ while True:
                 df_tf = symbol_frames.get(tf)
                 if df_tf is None or len(df_tf) < 3:
                     continue
-                swing_signal = scan_swing_signal(df_tf, symbol_frames=symbol_frames)
+                swing_signal = scan_swing_signal(df_tf, symbol_frames=symbol_frames, current_tf=tf)
                 if swing_signal:
                     swing_signal = dict(swing_signal)
                     swing_signal["interval"] = tf
@@ -382,8 +383,16 @@ while True:
                     last_skip_reason_by_symbol[symbol] = tradeable_reason
                     print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {tradeable_reason}")
                     continue
+
+                gold_ok, gold_reason = passes_gold_risk_guard(signal, symbol, len(active_positions))
+                if not gold_ok:
+                    last_skip_reason_by_symbol[symbol] = gold_reason
+                    print(f"[INFO] [{symbol}] Bỏ qua tín hiệu: {gold_reason}")
+                    continue
                     
-                entry_ok, drift_limit_pct, drift_pct = is_entry_still_valid(signal, float(live_price))
+                entry_ok, drift_limit_pct, drift_pct = is_entry_still_valid(
+                    signal, float(live_price), max_drift_pct=get_entry_drift_max_pct_for_symbol(symbol)
+                )
                 if not entry_ok:
                     last_skip_reason_by_symbol[symbol] = f"Giá lệch khỏi entry {drift_pct:.3f}% > ngưỡng {drift_limit_pct:.3f}%."
                     print(f"[INFO] [{symbol}] Bỏ qua: giá đã drift xa khỏi entry signal.")

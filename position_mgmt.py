@@ -13,8 +13,11 @@ from config import (
     TSL_ENABLED, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT,
     PARTIAL_TP_ROI_THRESHOLD, PARTIAL_TP_QUANTITY_FRACTION,
     INTERVAL, TSL_NOTIFY_MIN_PROGRESS_DELTA, TSL_NOTIFY_MIN_SL_MOVE_PCT,
+    XAU_GOLD_PROTECTION_ENABLED, XAU_GOLD_MIN_INTERVAL_MINUTES, XAU_GOLD_MAX_ACTIVE_ORDERS,
+    XAU_GOLD_MIN_QUALITY_BONUS, XAU_GOLD_MIN_RR, XAU_GOLD_MIN_NET_RR_AFTER_FEES,
+    XAU_GOLD_BLOCK_FALLBACK, XAU_GOLD_BLOCK_GRID, is_gold_symbol,
 )
-from utils import calc_rr_from_levels, now_vn
+from utils import calc_rr_from_levels, calc_net_rr_after_fees, interval_to_minutes, now_vn
 from notifications import send_telegram
 
 
@@ -106,6 +109,47 @@ def passes_quality_gate(signal: dict) -> tuple[bool, str]:
         f"{', Anti-silent ON' if (relax_quality > 0 or relax_rr > 0) else ''})"
     )
 
+
+
+def passes_gold_risk_guard(signal: dict, symbol: str, active_positions_count: int = 0) -> tuple[bool, str]:
+    """Extra conservative guard for XAU/XAUT/GOLD symbols, which tend to whip around news."""
+    if not XAU_GOLD_PROTECTION_ENABLED or not is_gold_symbol(symbol):
+        return True, "Gold guard không áp dụng"
+
+    mode = str(signal.get("signal_mode", "") or "").lower()
+    strategy = str(signal.get("strategy", "") or "").lower()
+    interval = str(signal.get("interval", INTERVAL) or INTERVAL).lower()
+    interval_minutes = interval_to_minutes(interval)
+
+    if XAU_GOLD_BLOCK_GRID and strategy == "grid":
+        return False, "Gold guard: tắt grid/mean-reversion cho XAU để tránh bắt dao rơi"
+    if XAU_GOLD_BLOCK_FALLBACK and "fallback" in mode:
+        return False, "Gold guard: bỏ qua fallback signal cho XAU"
+    if interval_minutes < int(XAU_GOLD_MIN_INTERVAL_MINUTES):
+        return False, f"Gold guard: TF {interval} < {XAU_GOLD_MIN_INTERVAL_MINUTES}m"
+    if active_positions_count >= max(1, int(XAU_GOLD_MAX_ACTIVE_ORDERS)):
+        return False, f"Gold guard: đã có {active_positions_count}/{XAU_GOLD_MAX_ACTIVE_ORDERS} lệnh XAU đang mở"
+
+    quality_now = float(signal.get("quality_score", 0) or 0)
+    min_quality = float(MIN_SIGNAL_QUALITY_SCORE) + float(XAU_GOLD_MIN_QUALITY_BONUS)
+    if quality_now < min_quality:
+        return False, f"Gold guard: quality {quality_now:.2f} < {min_quality:.2f}"
+
+    rr_now = calc_rr_from_levels(signal.get("side"), signal.get("entry"), signal.get("tp"), signal.get("sl"))
+    if rr_now is None:
+        rr_now = float(signal.get("rr", 0) or 0)
+    if rr_now < float(XAU_GOLD_MIN_RR):
+        return False, f"Gold guard: RR {rr_now:.2f} < {XAU_GOLD_MIN_RR:.2f}"
+
+    net_rr = calc_net_rr_after_fees(signal.get("side"), signal.get("entry"), signal.get("tp"), signal.get("sl"))
+    if net_rr is not None and net_rr < float(XAU_GOLD_MIN_NET_RR_AFTER_FEES):
+        return False, f"Gold guard: Net RR sau phí {net_rr:.2f} < {XAU_GOLD_MIN_NET_RR_AFTER_FEES:.2f}"
+
+    net_rr_text = f"{net_rr:.2f}" if net_rr is not None else "N/A"
+    return True, (
+        f"Gold guard đạt: TF={interval}, Q={quality_now:.2f}/{min_quality:.2f}, "
+        f"RR={rr_now:.2f}, NetRR={net_rr_text}"
+    )
 
 def effective_signal_cooldown(signal: dict) -> int:
     cooldown    = max(10, int(SIGNAL_COOLDOWN_SECONDS))
