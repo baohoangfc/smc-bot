@@ -60,13 +60,31 @@ def build_entry_reason(signal):
         fallback_rr=signal.get("rr", SCALP_RR_TARGET), decimals=2
     )
     quality_tier = signal.get("quality_tier", "standard")
-    return f"{strategy.upper()} {tf} | mode={mode} | tier={quality_tier} | quality={quality_text} | RR={rr_text}"
+    decision_tfs = signal.get("decision_tfs") or []
+    conflict_tfs = signal.get("decision_conflict_tfs") or []
+    trend_tfs = signal.get("trend_tfs") or []
+    trend_conflict_tfs = signal.get("trend_conflict_tfs") or []
+    decision_text = ""
+    if decision_tfs or conflict_tfs:
+        aligned_text = ",".join(decision_tfs) if decision_tfs else "-"
+        conflict_text = ",".join(conflict_tfs) if conflict_tfs else "-"
+        decision_text = f" | TF quyết định +:{aligned_text} -:{conflict_text}"
+    trend_text = ""
+    if trend_tfs or trend_conflict_tfs:
+        aligned_text = ",".join(trend_tfs) if trend_tfs else "-"
+        conflict_text = ",".join(trend_conflict_tfs) if trend_conflict_tfs else "-"
+        trend_score = signal.get("trend_score")
+        score_text = f" ({float(trend_score):+.2f})" if trend_score is not None else ""
+        trend_text = f" | Trend +:{aligned_text} -:{conflict_text}{score_text}"
+    return f"{strategy.upper()} {tf} | mode={mode} | tier={quality_tier} | quality={quality_text} | RR={rr_text}{decision_text}{trend_text}"
 
 
 def format_startup_msg(vst_balance, is_trading_enabled, engine_used,
                        scalp_intervals, swing_intervals, grid_enabled, grid_interval, grid_step_pct,
-                       signal_engine_config, symbols):
+                       signal_engine_config, symbols, decision_intervals=None):
     mode_text = "READ-ONLY (chỉ gửi tín hiệu)" if not is_trading_enabled else "TRADE TỰ ĐỘNG"
+    decision_intervals = decision_intervals or []
+    decision_line = f"🔎 TF quyết định: <b>{', '.join(decision_intervals)}</b> (không đặt lệnh trực tiếp)\n" if decision_intervals else ""
     return (
         "🚀 <b>SMC Bot đã khởi động</b>\n"
         f"💵 Số dư: <b>{vst_balance:.4f} VST</b>\n"
@@ -74,6 +92,7 @@ def format_startup_msg(vst_balance, is_trading_enabled, engine_used,
         f"📚 Danh mục: <b>{', '.join(symbols)}</b>\n"
         f"⏱️ Scalp TF: <b>{', '.join(scalp_intervals)}</b>\n"
         f"📈 Swing TF: <b>{', '.join(swing_intervals)}</b>\n"
+        f"{decision_line}"
         f"🧱 Grid fast: <b>{'ON' if grid_enabled else 'OFF'}</b> ({grid_interval}, step={grid_step_pct:.2f}%)\n"
         f"🧠 Signal engine: <b>{engine_used}</b> (config={signal_engine_config})\n"
         f"🕒 Thời gian: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"

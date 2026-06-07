@@ -39,10 +39,16 @@ if not SYMBOLS:
 SYMBOL = SYMBOLS[0]
 
 # ===================== Timeframes =====================
-INTERVAL            = os.environ.get("INTERVAL", "15m")
+INTERVAL            = os.environ.get("INTERVAL", "1h")
 SCALP_INTERVALS_RAW = os.environ.get("SCALP_INTERVALS", "5m,15m,1h")
-SWING_INTERVALS_RAW = os.environ.get("SWING_INTERVALS", "4h")
+SWING_INTERVALS_RAW = os.environ.get("SWING_INTERVALS", "4h,1d")
+DECISION_INTERVALS_RAW = os.environ.get("DECISION_INTERVALS", "5m,15m")
 VALID_INTERVALS     = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
+INTERVAL_MINUTES_MAP = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+MIN_TRADE_INTERVAL_MINUTES = int(os.environ.get("MIN_TRADE_INTERVAL_MINUTES", "60"))
+
+def interval_to_minutes_config(interval):
+    return INTERVAL_MINUTES_MAP.get((interval or "").lower(), 0)
 
 # ===================== Trade Parameters =====================
 RR                  = float(os.environ.get("RR", "2.0"))
@@ -98,7 +104,7 @@ XAU_GOLD_SYMBOL_KEYWORDS    = tuple(
     for item in os.environ.get("XAU_GOLD_SYMBOL_KEYWORDS", "XAU,XAUT,GOLD").split(",")
     if item.strip()
 )
-XAU_GOLD_MIN_INTERVAL_MINUTES = int(os.environ.get("XAU_GOLD_MIN_INTERVAL_MINUTES", "15"))
+XAU_GOLD_MIN_INTERVAL_MINUTES = int(os.environ.get("XAU_GOLD_MIN_INTERVAL_MINUTES", str(MIN_TRADE_INTERVAL_MINUTES)))
 XAU_GOLD_MAX_ACTIVE_ORDERS    = int(os.environ.get("XAU_GOLD_MAX_ACTIVE_ORDERS", "1"))
 XAU_GOLD_MIN_QUALITY_BONUS    = float(os.environ.get("XAU_GOLD_MIN_QUALITY_BONUS", "0.35"))
 XAU_GOLD_MIN_RR               = float(os.environ.get("XAU_GOLD_MIN_RR", "1.30"))
@@ -153,6 +159,8 @@ LOW_LIQUIDITY_MAX_ACTIVE_ORDERS  = int(os.environ.get("LOW_LIQUIDITY_MAX_ACTIVE_
 # ===================== Grid Bot =====================
 GRID_BOT_ENABLED    = os.environ.get("GRID_BOT_ENABLED", "false").lower() == "true"
 GRID_INTERVAL       = os.environ.get("GRID_INTERVAL", "1m").lower()
+if interval_to_minutes_config(GRID_INTERVAL) < int(MIN_TRADE_INTERVAL_MINUTES):
+    GRID_BOT_ENABLED = False
 GRID_ANCHOR_WINDOW  = int(os.environ.get("GRID_ANCHOR_WINDOW", "34"))
 GRID_LEVELS         = int(os.environ.get("GRID_LEVELS", "5"))
 GRID_STEP_PCT       = float(os.environ.get("GRID_STEP_PCT", "0.18"))
@@ -215,14 +223,33 @@ def parse_hour_windows(raw_value):
             continue
     return windows
 
-def sanitize_intervals(intervals, fallback):
-    valid = [i for i in intervals if i in VALID_INTERVALS]
-    return valid or fallback
+def sanitize_intervals(intervals, fallback, min_minutes=MIN_TRADE_INTERVAL_MINUTES):
+    valid = [
+        i for i in intervals
+        if i in VALID_INTERVALS and interval_to_minutes_config(i) >= int(min_minutes)
+    ]
+    fallback_valid = [
+        i for i in fallback
+        if i in VALID_INTERVALS and interval_to_minutes_config(i) >= int(min_minutes)
+    ]
+    return valid or fallback_valid or ["1h"]
 
+def sanitize_decision_intervals(intervals, fallback):
+    valid = [i for i in intervals if i in VALID_INTERVALS]
+    fallback_valid = [i for i in fallback if i in VALID_INTERVALS]
+    return valid or fallback_valid or ["5m", "15m"]
+
+INTERVAL = sanitize_intervals([INTERVAL], ["1h"])[0]
 SCALP_INTERVALS  = sanitize_intervals(parse_intervals(SCALP_INTERVALS_RAW, [INTERVAL]), [INTERVAL])
-SWING_INTERVALS  = sanitize_intervals(parse_intervals(SWING_INTERVALS_RAW, ["4h"]), ["4h"])
-SIGNAL_INTERVALS = list(dict.fromkeys(SCALP_INTERVALS + SWING_INTERVALS))
-if GRID_BOT_ENABLED and GRID_INTERVAL in VALID_INTERVALS and GRID_INTERVAL not in SIGNAL_INTERVALS:
+SWING_INTERVALS  = sanitize_intervals(parse_intervals(SWING_INTERVALS_RAW, ["4h", "1d"]), ["4h", "1d"])
+DECISION_INTERVALS = sanitize_decision_intervals(parse_intervals(DECISION_INTERVALS_RAW, ["5m", "15m"]), ["5m", "15m"])
+SIGNAL_INTERVALS = list(dict.fromkeys(DECISION_INTERVALS + SCALP_INTERVALS + SWING_INTERVALS))
+if (
+    GRID_BOT_ENABLED
+    and GRID_INTERVAL in VALID_INTERVALS
+    and interval_to_minutes_config(GRID_INTERVAL) >= int(MIN_TRADE_INTERVAL_MINUTES)
+    and GRID_INTERVAL not in SIGNAL_INTERVALS
+):
     SIGNAL_INTERVALS.append(GRID_INTERVAL)
 
 LIQUIDITY_WINDOWS_VN = parse_hour_windows(LIQUIDITY_WINDOWS_VN_RAW)
