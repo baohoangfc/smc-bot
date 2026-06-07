@@ -9,14 +9,14 @@ from flask import Flask, jsonify, render_template, request
 
 # Các cấu hình và biến toàn cục
 from config import (
-    SYMBOLS, SIGNAL_INTERVALS, SCALP_INTERVALS, SWING_INTERVALS,
+    SYMBOLS, SIGNAL_INTERVALS, SCALP_INTERVALS, SWING_INTERVALS, DECISION_INTERVALS,
     GRID_BOT_ENABLED, GRID_INTERVAL, GRID_MIN_CANDLES,
     INTERVAL, DATA_SOURCE, MARGIN_STANDARD, MARGIN_HIGH_QUALITY,
     LEVERAGE,
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
     STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT,
-    get_entry_drift_max_pct_for_symbol,
+    get_entry_drift_max_pct_for_symbol, interval_to_minutes_config,
 )
 
 # Helpers
@@ -187,6 +187,161 @@ def fetch_data(symbol, interval="15m", candles=500):
     except Exception:
         return None
 
+
+
+def analyze_timeframe_trend(df, tf):
+    """Analyze EMA/slope trend for one timeframe using the last closed candle."""
+    required_cols = {"close", "ema50", "ema200"}
+    if df is None or len(df) < 25 or not required_cols.issubset(df.columns):
+        return None
+
+    i = len(df) - 2
+    lookback = max(5, min(20, i))
+    close_now = float(df["close"].iloc[i])
+    close_prev = float(df["close"].iloc[i - lookback])
+    ema50 = float(df["ema50"].iloc[i])
+    ema200 = float(df["ema200"].iloc[i])
+    ema50_prev = float(df["ema50"].iloc[i - lookback])
+
+    if close_now <= 0:
+        return None
+
+    ema_gap_pct = abs(ema50 - ema200) / close_now * 100.0
+    slope_pct = (close_now - close_prev) / max(close_prev, 1e-9) * 100.0
+    ema_slope_pct = (ema50 - ema50_prev) / max(abs(ema50_prev), 1e-9) * 100.0
+
+    bullish_votes = int(ema50 > ema200) + int(close_now > ema50) + int(slope_pct > 0) + int(ema_slope_pct > 0)
+    bearish_votes = int(ema50 < ema200) + int(close_now < ema50) + int(slope_pct < 0) + int(ema_slope_pct < 0)
+
+    if bullish_votes >= 3 and bullish_votes > bearish_votes:
+        trend = "BULLISH"
+    elif bearish_votes >= 3 and bearish_votes > bullish_votes:
+        trend = "BEARISH"
+    else:
+        trend = "SIDEWAY"
+
+    strength = min(1.0, (ema_gap_pct / 1.2) * 0.55 + (abs(slope_pct) / 1.5) * 0.30 + (abs(ema_slope_pct) / 0.8) * 0.15)
+    return {
+        "interval": tf,
+        "trend": trend,
+        "strength": round(strength, 3),
+        "ema_gap_pct": round(ema_gap_pct, 3),
+        "slope_pct": round(slope_pct, 3),
+    }
+
+
+def analyze_trend_context(symbol_frames):
+    """Build trend context for all tracked timeframes, including decision TFs."""
+    trend_context = {}
+    for tf in SIGNAL_INTERVALS:
+        trend_info = analyze_timeframe_trend(symbol_frames.get(tf), tf)
+        if trend_info:
+            trend_context[tf] = trend_info
+    return trend_context
+
+
+def _trend_weight(tf):
+    minutes = interval_to_minutes_config(tf)
+    if minutes >= 1440:
+        return 1.60
+    if minutes >= 240:
+        return 1.35
+    if minutes >= 60:
+        return 1.10
+    if minutes >= 15:
+        return 0.70
+    return 0.50
+
+
+def apply_trend_context(signal, trend_context):
+    """Adjust 1h+ candidates with multi-timeframe trend alignment/conflict."""
+    if not signal or not trend_context:
+        return signal
+
+    side = signal.get("side")
+    desired_trend = "BULLISH" if side == "LONG" else "BEARISH" if side == "SHORT" else None
+    if not desired_trend:
+        return signal
+
+    aligned = []
+    conflicted = []
+    weighted_score = 0.0
+    total_weight = 0.0
+    for tf, trend_info in trend_context.items():
+        trend = trend_info.get("trend")
+        if trend == "SIDEWAY":
+            continue
+        weight = _trend_weight(tf) * max(0.25, float(trend_info.get("strength", 0) or 0))
+        total_weight += weight
+        if trend == desired_trend:
+            aligned.append(tf)
+            weighted_score += weight
+        else:
+            conflicted.append(tf)
+            weighted_score -= weight
+
+    if total_weight <= 0:
+        return signal
+
+    trend_score = weighted_score / total_weight
+    trend_adjust = max(-0.70, min(0.50, trend_score * 0.45))
+    quality_now = float(signal.get("quality_score", 0) or 0)
+    signal["quality_score"] = round(quality_now + trend_adjust, 2)
+    signal["trend_score"] = round(trend_score, 3)
+    signal["trend_tfs"] = aligned
+    signal["trend_conflict_tfs"] = conflicted
+    if aligned and conflicted:
+        signal["trend_alignment"] = "mixed"
+    elif aligned:
+        signal["trend_alignment"] = "aligned"
+    elif conflicted:
+        signal["trend_alignment"] = "conflicted"
+    return signal
+
+
+def scan_decision_timeframe_signals(symbol_frames):
+    """Scan lower TF signals (5m/15m by default) as context, not direct order candidates."""
+    decision_signals = []
+    for tf in DECISION_INTERVALS:
+        df_tf = symbol_frames.get(tf)
+        if df_tf is None or len(df_tf) < 3:
+            continue
+        low_tf_signal = scan_signal(df_tf, symbol_frames=symbol_frames, current_tf=tf)
+        if low_tf_signal:
+            low_tf_signal = dict(low_tf_signal)
+            low_tf_signal["interval"] = tf
+            low_tf_signal["strategy"] = "decision"
+            decision_signals.append(low_tf_signal)
+    return decision_signals
+
+
+def apply_decision_timeframe_context(signal, decision_signals):
+    """Use lower TF signals to boost or penalize 1h+ trade candidates."""
+    if not signal or not decision_signals:
+        return signal
+
+    side = signal.get("side")
+    aligned = [s for s in decision_signals if s.get("side") == side]
+    conflicted = [s for s in decision_signals if s.get("side") and s.get("side") != side]
+
+    if not aligned and not conflicted:
+        return signal
+
+    quality_now = float(signal.get("quality_score", 0) or 0)
+    aligned_bonus = min(0.40, 0.20 * len(aligned))
+    conflict_penalty = min(0.50, 0.25 * len(conflicted))
+    signal["quality_score"] = round(quality_now + aligned_bonus - conflict_penalty, 2)
+    signal["decision_tfs"] = [s.get("interval") for s in aligned]
+    signal["decision_conflict_tfs"] = [s.get("interval") for s in conflicted]
+    if aligned and conflicted:
+        signal["decision_alignment"] = "mixed"
+    elif aligned:
+        signal["decision_alignment"] = "aligned"
+    elif conflicted:
+        signal["decision_alignment"] = "conflicted"
+    return signal
+
+
 def mark_learning_dirty(meta_dict):
     meta_dict["dirty"] = True
 
@@ -270,7 +425,7 @@ for symbol in SYMBOLS:
 from config import GRID_STEP_PCT
 send_telegram(format_startup_msg(
     vst_bal, is_trading_enabled(), resolve_signal_engine(), SCALP_INTERVALS, SWING_INTERVALS, 
-    GRID_BOT_ENABLED, GRID_INTERVAL, GRID_STEP_PCT, resolve_signal_engine(), SYMBOLS
+    GRID_BOT_ENABLED, GRID_INTERVAL, GRID_STEP_PCT, resolve_signal_engine(), SYMBOLS, DECISION_INTERVALS
 ))
 
 if not is_trading_enabled():
@@ -326,6 +481,8 @@ while True:
             if live_price is None:
                 live_price = float(last_closed["close"])
 
+            decision_signals = scan_decision_timeframe_signals(symbol_frames)
+            trend_context = analyze_trend_context(symbol_frames)
             candidates = []
             for tf in SCALP_INTERVALS:
                 df_tf = symbol_frames.get(tf)
@@ -337,6 +494,8 @@ while True:
                     scalp_signal["interval"] = tf
                     scalp_signal["strategy"] = "scalp"
                     scalp_signal = apply_learning_to_signal_v2(learning_state, symbol, scalp_signal)
+                    scalp_signal = apply_decision_timeframe_context(scalp_signal, decision_signals)
+                    scalp_signal = apply_trend_context(scalp_signal, trend_context)
                     candidates.append(scalp_signal)
 
             for tf in SWING_INTERVALS:
@@ -348,6 +507,8 @@ while True:
                     swing_signal = dict(swing_signal)
                     swing_signal["interval"] = tf
                     swing_signal = apply_learning_to_signal_v2(learning_state, symbol, swing_signal)
+                    swing_signal = apply_decision_timeframe_context(swing_signal, decision_signals)
+                    swing_signal = apply_trend_context(swing_signal, trend_context)
                     candidates.append(swing_signal)
 
             if GRID_BOT_ENABLED:
@@ -358,6 +519,8 @@ while True:
                         grid_signal = dict(grid_signal)
                         grid_signal["interval"] = GRID_INTERVAL
                         grid_signal = apply_learning_to_signal_v2(learning_state, symbol, grid_signal)
+                        grid_signal = apply_decision_timeframe_context(grid_signal, decision_signals)
+                        grid_signal = apply_trend_context(grid_signal, trend_context)
                         candidates.append(grid_signal)
 
             signal_eval_time = now_vn()
