@@ -167,6 +167,12 @@ LEARNING_ENABLED       = os.environ.get("LEARNING_ENABLED", "true").lower() == "
 LEARNING_FILE          = os.environ.get("LEARNING_FILE", "learning_state.json")
 LEARNING_MIN_TRADES    = int(os.environ.get("LEARNING_MIN_TRADES", "5"))
 LEARNING_SAVE_INTERVAL = int(os.environ.get("LEARNING_SAVE_INTERVAL", "60"))
+LEARNING_BLOCK_BAD_COMBOS = os.environ.get("LEARNING_BLOCK_BAD_COMBOS", "true").lower() == "true"
+LEARNING_BAD_COMBO_MIN_TRADES = int(os.environ.get("LEARNING_BAD_COMBO_MIN_TRADES", "8"))
+LEARNING_BAD_COMBO_MAX_WIN_RATE = float(os.environ.get("LEARNING_BAD_COMBO_MAX_WIN_RATE", "0.35"))
+LEARNING_BAD_COMBO_MIN_AVG_PNL = float(os.environ.get("LEARNING_BAD_COMBO_MIN_AVG_PNL", "0.0"))
+LEARNING_LOSS_STREAK_BLOCK = int(os.environ.get("LEARNING_LOSS_STREAK_BLOCK", "3"))
+LEARNING_MAX_QUALITY_PENALTY = float(os.environ.get("LEARNING_MAX_QUALITY_PENALTY", "1.20"))
 
 # ===================== Firebase Persistence =====================
 FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS_JSON", "")

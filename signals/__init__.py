@@ -33,6 +33,9 @@ def scan_signal(df, symbol_frames=None, current_tf=None) -> dict | None:
 
 
 def signal_priority_score(signal: dict, dt_value=None) -> float:
+    if signal.get("learning_blocked"):
+        return -9999.0
+
     from position_mgmt import is_high_liquidity_time
     quality    = float(signal.get("quality_score", 0) or 0)
     rr_value   = float(signal.get("rr", 0) or 0)
