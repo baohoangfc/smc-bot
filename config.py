@@ -42,7 +42,8 @@ SYMBOL = SYMBOLS[0]
 INTERVAL            = os.environ.get("INTERVAL", "1h")
 SCALP_INTERVALS_RAW = os.environ.get("SCALP_INTERVALS", "5m,15m,1h")
 SWING_INTERVALS_RAW = os.environ.get("SWING_INTERVALS", "4h,1d")
-DECISION_INTERVALS_RAW = os.environ.get("DECISION_INTERVALS", "5m,15m")
+DEFAULT_DECISION_INTERVALS = ["5m", "15m", "1h", "4h", "1d"]
+DECISION_INTERVALS_RAW = os.environ.get("DECISION_INTERVALS", ",".join(DEFAULT_DECISION_INTERVALS))
 VALID_INTERVALS     = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 INTERVAL_MINUTES_MAP = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
 MIN_TRADE_INTERVAL_MINUTES = int(os.environ.get("MIN_TRADE_INTERVAL_MINUTES", "60"))
@@ -242,7 +243,7 @@ def sanitize_decision_intervals(intervals, fallback):
 INTERVAL = sanitize_intervals([INTERVAL], ["1h"])[0]
 SCALP_INTERVALS  = sanitize_intervals(parse_intervals(SCALP_INTERVALS_RAW, [INTERVAL]), [INTERVAL])
 SWING_INTERVALS  = sanitize_intervals(parse_intervals(SWING_INTERVALS_RAW, ["4h", "1d"]), ["4h", "1d"])
-DECISION_INTERVALS = sanitize_decision_intervals(parse_intervals(DECISION_INTERVALS_RAW, ["5m", "15m"]), ["5m", "15m"])
+DECISION_INTERVALS = sanitize_decision_intervals(parse_intervals(DECISION_INTERVALS_RAW, DEFAULT_DECISION_INTERVALS), DEFAULT_DECISION_INTERVALS)
 SIGNAL_INTERVALS = list(dict.fromkeys(DECISION_INTERVALS + SCALP_INTERVALS + SWING_INTERVALS))
 if (
     GRID_BOT_ENABLED

@@ -3,7 +3,7 @@
 > Mục tiêu: Tổng hợp trạng thái code mới nhất để Codex có thể đọc nhanh và sửa đúng ngữ cảnh khi có thay đổi.
 
 ## 1) Version snapshot
-- Context version: `v2026.06.07-1`
+- Context version: `v2026.06.07-2`
 - Repo chính hiện tại: `smc-bot`
 - File runtime cốt lõi: `bot.py`
 - Các file hỗ trợ: `requirements.txt`, `Dockerfile`, `railway.toml`, `SMC_AUDIT.md`
@@ -25,13 +25,19 @@
 - **Penalty thích nghi**: các bucket có Bayesian win-rate thấp, stable avg PnL âm hoặc loss streak sẽ bị trừ quality mạnh hơn trước; RR cũng giảm/nâng nhẹ theo expectancy đã làm mượt.
 - **Config mới**: `LEARNING_BLOCK_BAD_COMBOS`, `LEARNING_BAD_COMBO_MIN_TRADES`, `LEARNING_BAD_COMBO_MAX_WIN_RATE`, `LEARNING_BAD_COMBO_MIN_AVG_PNL`, `LEARNING_LOSS_STREAK_BLOCK`, `LEARNING_MAX_QUALITY_PENALTY`.
 
+## 1d) Thay đổi decision TF đa khung (07/06/2026)
+- **Decision TF mặc định mở rộng**: `DECISION_INTERVALS` mặc định từ `5m,15m` thành `5m,15m,1h,4h,1d` để tín hiệu quyết định lấy bối cảnh đa khung.
+- **Chống tự xác nhận**: khi boost/penalty quality cho candidate, bot bỏ qua decision signal trùng chính `interval` của candidate để tránh 1h/4h/1d tự cộng điểm cho nó.
+- **Trọng số theo TF**: decision context dùng trọng số nhẹ cho 5m/15m và mạnh hơn cho 1h/4h/1d; đồng thuận tăng quality có trần, xung đột bị phạt mạnh hơn để ưu tiên setup cùng hướng đa khung.
+
 ## 2) Luồng bot hiện tại (rút gọn)
 1. Lấy dữ liệu giá/khung thời gian.
 2. Sinh tín hiệu SMC theo các TF theo dõi.
 3. Nếu có tín hiệu đạt điều kiện => gửi noti tín hiệu + vào lệnh (nếu bật trade).
 4. Nếu chưa có tín hiệu và không có lệnh mở => gửi noti trạng thái theo chu kỳ.
-5. Trước khi vào lệnh, learning guard có thể giảm điểm hoặc chặn các bucket `symbol|strategy|interval|side` đang có thống kê lỗ/chuỗi lỗ.
-6. Khi có vị thế mở => đồng bộ vị thế, theo dõi PnL, quản trị TP/SL, đóng vòng lệnh.
+5. Candidate được điều chỉnh thêm bằng decision context đa khung (`DECISION_INTERVALS`, mặc định `5m,15m,1h,4h,1d`) và trend context toàn bộ TF theo dõi trước khi qua quality gate.
+6. Trước khi vào lệnh, learning guard có thể giảm điểm hoặc chặn các bucket `symbol|strategy|interval|side` đang có thống kê lỗ/chuỗi lỗ.
+7. Khi có vị thế mở => đồng bộ vị thế, theo dõi PnL, quản trị TP/SL, đóng vòng lệnh.
 
 ## 3) Notification contract hiện tại
 

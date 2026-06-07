@@ -300,7 +300,7 @@ def apply_trend_context(signal, trend_context):
 
 
 def scan_decision_timeframe_signals(symbol_frames):
-    """Scan lower TF signals (5m/15m by default) as context, not direct order candidates."""
+    """Scan configured multi-timeframe signals as decision context, not direct order candidates."""
     decision_signals = []
     for tf in DECISION_INTERVALS:
         df_tf = symbol_frames.get(tf)
@@ -315,21 +315,38 @@ def scan_decision_timeframe_signals(symbol_frames):
     return decision_signals
 
 
+def _decision_tf_weight(tf):
+    minutes = interval_to_minutes_config(tf)
+    if minutes >= 1440:
+        return 1.20
+    if minutes >= 240:
+        return 1.00
+    if minutes >= 60:
+        return 0.80
+    if minutes >= 15:
+        return 0.55
+    return 0.40
+
+
 def apply_decision_timeframe_context(signal, decision_signals):
-    """Use lower TF signals to boost or penalize 1h+ trade candidates."""
+    """Use multi-timeframe decision signals to boost or penalize trade candidates."""
     if not signal or not decision_signals:
         return signal
 
     side = signal.get("side")
-    aligned = [s for s in decision_signals if s.get("side") == side]
-    conflicted = [s for s in decision_signals if s.get("side") and s.get("side") != side]
+    candidate_tf = signal.get("interval")
+    usable_signals = [s for s in decision_signals if s.get("interval") != candidate_tf]
+    aligned = [s for s in usable_signals if s.get("side") == side]
+    conflicted = [s for s in usable_signals if s.get("side") and s.get("side") != side]
 
     if not aligned and not conflicted:
         return signal
 
+    aligned_weight = sum(_decision_tf_weight(s.get("interval")) for s in aligned)
+    conflict_weight = sum(_decision_tf_weight(s.get("interval")) for s in conflicted)
     quality_now = float(signal.get("quality_score", 0) or 0)
-    aligned_bonus = min(0.40, 0.20 * len(aligned))
-    conflict_penalty = min(0.50, 0.25 * len(conflicted))
+    aligned_bonus = min(0.55, 0.12 * aligned_weight)
+    conflict_penalty = min(0.70, 0.18 * conflict_weight)
     signal["quality_score"] = round(quality_now + aligned_bonus - conflict_penalty, 2)
     signal["decision_tfs"] = [s.get("interval") for s in aligned]
     signal["decision_conflict_tfs"] = [s.get("interval") for s in conflicted]
