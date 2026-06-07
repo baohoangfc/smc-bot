@@ -57,6 +57,9 @@ def current_max_active_orders(dt_value=None) -> int:
 # ───────────────────────────────────────────
 
 def passes_quality_gate(signal: dict) -> tuple[bool, str]:
+    if signal.get("learning_blocked"):
+        return False, str(signal.get("learning_block_reason") or "Learning guard: combo đang có hiệu suất kém")
+
     quality_now = float(signal.get("quality_score", 0) or 0)
     rr_now      = calc_rr_from_levels(signal.get("side"), signal.get("entry"), signal.get("tp"), signal.get("sl"))
     if rr_now is None:

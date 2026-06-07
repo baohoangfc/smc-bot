@@ -3,7 +3,7 @@
 > Mục tiêu: Tổng hợp trạng thái code mới nhất để Codex có thể đọc nhanh và sửa đúng ngữ cảnh khi có thay đổi.
 
 ## 1) Version snapshot
-- Context version: `v2026.06.05-1`
+- Context version: `v2026.06.07-1`
 - Repo chính hiện tại: `smc-bot`
 - File runtime cốt lõi: `bot.py`
 - Các file hỗ trợ: `requirements.txt`, `Dockerfile`, `railway.toml`, `SMC_AUDIT.md`
@@ -19,12 +19,19 @@
 - **Startup**: Khôi phục positions từ Firestore/file trước, sau đó check vị thế thực trên sàn, tránh đánh số label trùng.
 - **Deps**: `firebase-admin==6.5.0` thêm vào `requirements.txt`
 
+## 1c) Thay đổi tối ưu lợi nhuận (07/06/2026)
+- **Learning guard chống lỗ kéo dài**: `learning.py` nay lưu thêm `loss_streak`, `win_streak`, `max_loss_streak`, `last_pnl` theo từng bucket `symbol|strategy|interval|side`.
+- **Chặn combo hiệu suất kém**: nếu bucket đủ mẫu nhưng win-rate thấp, avg PnL âm hoặc đang có chuỗi lỗ, tín hiệu sẽ được gắn `learning_blocked` để quality gate bỏ qua thay vì tiếp tục vào cùng setup đang lỗ.
+- **Penalty thích nghi**: các bucket có Bayesian win-rate thấp, stable avg PnL âm hoặc loss streak sẽ bị trừ quality mạnh hơn trước; RR cũng giảm/nâng nhẹ theo expectancy đã làm mượt.
+- **Config mới**: `LEARNING_BLOCK_BAD_COMBOS`, `LEARNING_BAD_COMBO_MIN_TRADES`, `LEARNING_BAD_COMBO_MAX_WIN_RATE`, `LEARNING_BAD_COMBO_MIN_AVG_PNL`, `LEARNING_LOSS_STREAK_BLOCK`, `LEARNING_MAX_QUALITY_PENALTY`.
+
 ## 2) Luồng bot hiện tại (rút gọn)
 1. Lấy dữ liệu giá/khung thời gian.
 2. Sinh tín hiệu SMC theo các TF theo dõi.
 3. Nếu có tín hiệu đạt điều kiện => gửi noti tín hiệu + vào lệnh (nếu bật trade).
 4. Nếu chưa có tín hiệu và không có lệnh mở => gửi noti trạng thái theo chu kỳ.
-5. Khi có vị thế mở => đồng bộ vị thế, theo dõi PnL, quản trị TP/SL, đóng vòng lệnh.
+5. Trước khi vào lệnh, learning guard có thể giảm điểm hoặc chặn các bucket `symbol|strategy|interval|side` đang có thống kê lỗ/chuỗi lỗ.
+6. Khi có vị thế mở => đồng bộ vị thế, theo dõi PnL, quản trị TP/SL, đóng vòng lệnh.
 
 ## 3) Notification contract hiện tại
 
@@ -69,6 +76,7 @@
 - Nếu sửa wording/format noti: cập nhật lại mục **3) Notification contract** trong file này.
 - Nếu sửa logic vào lệnh/thoát lệnh: cập nhật mục **2) Luồng bot hiện tại**.
 - Nếu thêm biến cấu hình mới ảnh hưởng noti: ghi rõ tên biến và tác động.
+- Nếu thêm biến cấu hình mới ảnh hưởng vào/thoát lệnh: cập nhật mục thay đổi và luồng bot.
 - Mỗi thay đổi nên tăng `Context version` theo dạng: `vYYYY.MM.DD-N`.
 
 ## 5) Checklist trước khi commit
