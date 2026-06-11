@@ -6,6 +6,7 @@ import threading
 
 from config import (
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, HTTP_SESSION, HTTP_TIMEOUT,
+    TELEGRAM_COMMANDS_ENABLED, PUBLIC_BASE_URL,
     DATA_SOURCE, INTERVAL, SIGNAL_INTERVALS, TELEGRAM_DEDUP_WINDOW_SECONDS,
     SCALP_RR_TARGET, MARGIN_STANDARD, MARGIN_HIGH_QUALITY, LEVERAGE, RR,
 )
@@ -17,6 +18,147 @@ from utils import (
 _telegram_recent_messages: dict = {}
 _telegram_dedup_lock = threading.Lock()
 
+
+TELEGRAM_COMMANDS = [
+    {"command": "start", "description": "Khởi động và xem hướng dẫn dùng bot"},
+    {"command": "help", "description": "Danh sách lệnh Telegram của SMC Bot"},
+    {"command": "status", "description": "Xem trạng thái chạy, symbol và TF theo dõi"},
+    {"command": "positions", "description": "Xem các lệnh/vị thế bot đang theo dõi"},
+    {"command": "balance", "description": "Xem số dư VST hiện tại"},
+    {"command": "dashboard", "description": "Mở dashboard read-only nếu đã cấu hình URL"},
+]
+
+
+def _telegram_api_post(method: str, payload: dict, timeout=None):
+    if not TELEGRAM_TOKEN:
+        return None
+    try:
+        resp = HTTP_SESSION.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}",
+            json=payload,
+            timeout=HTTP_TIMEOUT if timeout is None else timeout,
+        )
+        if not resp.ok:
+            print(f"[WARN] Telegram {method} failed: {resp.status_code} {resp.text[:300]}")
+            return None
+        return resp.json()
+    except Exception as e:
+        print(f"[WARN] Telegram {method} exception: {e}")
+        return None
+
+
+def send_telegram_direct(msg: str, chat_id=None, reply_to_message_id=None):
+    """Send an operational Telegram reply without the signal-notification dedup cache."""
+    target_chat_id = chat_id or TELEGRAM_CHAT_ID
+    if not TELEGRAM_TOKEN or not target_chat_id:
+        return None
+    payload = {"chat_id": target_chat_id, "text": msg, "parse_mode": "HTML"}
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+        payload["allow_sending_without_reply"] = True
+    return _telegram_api_post("sendMessage", payload)
+
+
+def register_telegram_commands():
+    """Publish BotFather-style command menu so users can see commands in Telegram."""
+    if not TELEGRAM_TOKEN:
+        return False
+
+    payload = {"commands": TELEGRAM_COMMANDS}
+    default_ok = bool((_telegram_api_post("setMyCommands", payload) or {}).get("ok"))
+    chat_ok = False
+    if TELEGRAM_CHAT_ID:
+        chat_payload = dict(payload)
+        chat_payload["scope"] = {"type": "chat", "chat_id": TELEGRAM_CHAT_ID}
+        chat_ok = bool((_telegram_api_post("setMyCommands", chat_payload) or {}).get("ok"))
+    if default_ok or chat_ok:
+        print("[SYSTEM] Telegram command menu registered.")
+        return True
+    print("[WARN] Telegram command menu registration did not succeed.")
+    return False
+
+
+def format_help_command_msg():
+    if PUBLIC_BASE_URL:
+        dashboard_line = "\n🌐 /dashboard - mở dashboard read-only"
+    else:
+        dashboard_line = "\n🌐 /dashboard - URL dashboard chưa cấu hình PUBLIC_BASE_URL"
+    return (
+        "🤖 <b>SMC Bot - Lệnh Telegram</b>\n\n"
+        "🚀 /start - kiểm tra bot và xem hướng dẫn nhanh\n"
+        "❓ /help - xem danh sách lệnh\n"
+        "📊 /status - trạng thái bot, mode, symbol và TF\n"
+        "📌 /positions - vị thế/lệnh bot đang theo dõi\n"
+        "💵 /balance - số dư VST hiện tại"
+        f"{dashboard_line}\n\n"
+        "Nếu menu lệnh chưa hiện ngay, hãy đóng/mở lại khung chat Telegram hoặc gõ /help trực tiếp."
+    )
+
+
+def _normalize_telegram_command(text: str):
+    first = (text or "").strip().split(maxsplit=1)[0].lower()
+    if not first.startswith("/"):
+        return ""
+    command = first[1:].split("@", 1)[0]
+    return command
+
+
+def _is_allowed_command_chat(chat_id) -> bool:
+    if not TELEGRAM_CHAT_ID:
+        return True
+    return str(chat_id) == str(TELEGRAM_CHAT_ID)
+
+
+def run_telegram_command_polling(status_provider):
+    """Small getUpdates loop for /status-like commands; safe to run in a daemon thread."""
+    if not TELEGRAM_COMMANDS_ENABLED or not TELEGRAM_TOKEN:
+        return
+
+    register_telegram_commands()
+    offset = None
+    initial = _telegram_api_post(
+        "getUpdates",
+        {"timeout": 0, "limit": 1, "offset": -1, "allowed_updates": ["message"]},
+        timeout=5,
+    )
+    if initial and initial.get("ok") and initial.get("result"):
+        offset = max(int(item.get("update_id", 0)) for item in initial["result"]) + 1
+
+    print("[SYSTEM] Telegram command polling started.")
+    while True:
+        params = {"timeout": 25, "limit": 20, "allowed_updates": ["message"]}
+        if offset is not None:
+            params["offset"] = offset
+        data = _telegram_api_post("getUpdates", params, timeout=35)
+        if not data or not data.get("ok"):
+            time.sleep(5)
+            continue
+
+        for update in data.get("result", []):
+            offset = int(update.get("update_id", 0)) + 1
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            text = message.get("text") or ""
+            command = _normalize_telegram_command(text)
+            if not command:
+                continue
+            if not _is_allowed_command_chat(chat_id):
+                print(f"[WARN] Ignore Telegram command from unauthorized chat_id={chat_id}")
+                continue
+
+            try:
+                if command in {"start", "help"}:
+                    reply = format_help_command_msg()
+                elif command in {"status", "positions", "balance", "dashboard"}:
+                    reply = status_provider(command)
+                else:
+                    reply = "⚠️ Lệnh chưa hỗ trợ. Gõ /help để xem danh sách lệnh hiện có."
+            except Exception as e:
+                print(f"[WARN] Telegram command handler failed: {e}")
+                reply = "⚠️ Bot gặp lỗi khi xử lý lệnh. Vui lòng thử lại sau."
+
+            send_telegram_direct(reply, chat_id=chat_id, reply_to_message_id=message.get("message_id"))
 
 def send_telegram(msg: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
