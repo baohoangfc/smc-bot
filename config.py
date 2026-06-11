@@ -11,6 +11,8 @@ from urllib3.util.retry import Retry
 # ===================== API Credentials =====================
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_COMMANDS_ENABLED = os.environ.get("TELEGRAM_COMMANDS_ENABLED", "true").lower() == "true"
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
 BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
 BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 BINGX_URL        = "https://open-api-vst.bingx.com"
@@ -40,13 +42,15 @@ SYMBOL = SYMBOLS[0]
 
 # ===================== Timeframes =====================
 INTERVAL            = os.environ.get("INTERVAL", "1h")
-SCALP_INTERVALS_RAW = os.environ.get("SCALP_INTERVALS", "5m,15m,1h")
+# Include 15m/30m by default; 1h-only scanning was too sparse for active operation.
+SCALP_INTERVALS_RAW = os.environ.get("SCALP_INTERVALS", "15m,30m,1h")
 SWING_INTERVALS_RAW = os.environ.get("SWING_INTERVALS", "4h,1d")
 DEFAULT_DECISION_INTERVALS = ["5m", "15m", "1h", "4h", "1d"]
 DECISION_INTERVALS_RAW = os.environ.get("DECISION_INTERVALS", ",".join(DEFAULT_DECISION_INTERVALS))
 VALID_INTERVALS     = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 INTERVAL_MINUTES_MAP = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
-MIN_TRADE_INTERVAL_MINUTES = int(os.environ.get("MIN_TRADE_INTERVAL_MINUTES", "60"))
+# Default 15m keeps signal frequency usable while still avoiding very noisy 1m/3m entries.
+MIN_TRADE_INTERVAL_MINUTES = int(os.environ.get("MIN_TRADE_INTERVAL_MINUTES", "15"))
 
 def interval_to_minutes_config(interval):
     return INTERVAL_MINUTES_MAP.get((interval or "").lower(), 0)
@@ -77,7 +81,7 @@ SCALP_MIN_QUALITY_SCORE    = float(os.environ.get("SCALP_MIN_QUALITY_SCORE", "1.
 MIN_SIGNAL_QUALITY_SCORE   = float(os.environ.get("MIN_SIGNAL_QUALITY_SCORE", "2.00"))
 HIGH_QUALITY_THRESHOLD     = float(os.environ.get("HIGH_QUALITY_THRESHOLD", "2.60"))
 HIGH_QUALITY_COOLDOWN_FACTOR = float(os.environ.get("HIGH_QUALITY_COOLDOWN_FACTOR", "0.70"))
-FALLBACK_MIN_QUALITY_SCORE = float(os.environ.get("FALLBACK_MIN_QUALITY_SCORE", "2.50"))
+FALLBACK_MIN_QUALITY_SCORE = float(os.environ.get("FALLBACK_MIN_QUALITY_SCORE", "2.25"))
 
 # ===================== Risk / SL =====================
 SL_BUFFER_PCT    = float(os.environ.get("SL_BUFFER_PCT", "0.12"))
@@ -105,11 +109,12 @@ XAU_GOLD_SYMBOL_KEYWORDS    = tuple(
     for item in os.environ.get("XAU_GOLD_SYMBOL_KEYWORDS", "XAU,XAUT,GOLD").split(",")
     if item.strip()
 )
-XAU_GOLD_MIN_INTERVAL_MINUTES = int(os.environ.get("XAU_GOLD_MIN_INTERVAL_MINUTES", str(MIN_TRADE_INTERVAL_MINUTES)))
-XAU_GOLD_MAX_ACTIVE_ORDERS    = int(os.environ.get("XAU_GOLD_MAX_ACTIVE_ORDERS", "1"))
-XAU_GOLD_MIN_QUALITY_BONUS    = float(os.environ.get("XAU_GOLD_MIN_QUALITY_BONUS", "0.35"))
+# Gold stays protected from 1m/3m noise, but 15m setups are allowed by default.
+XAU_GOLD_MIN_INTERVAL_MINUTES = int(os.environ.get("XAU_GOLD_MIN_INTERVAL_MINUTES", "15"))
+XAU_GOLD_MAX_ACTIVE_ORDERS    = int(os.environ.get("XAU_GOLD_MAX_ACTIVE_ORDERS", "2"))
+XAU_GOLD_MIN_QUALITY_BONUS    = float(os.environ.get("XAU_GOLD_MIN_QUALITY_BONUS", "0.15"))
 XAU_GOLD_MIN_RR               = float(os.environ.get("XAU_GOLD_MIN_RR", "1.30"))
-XAU_GOLD_MIN_NET_RR_AFTER_FEES = float(os.environ.get("XAU_GOLD_MIN_NET_RR_AFTER_FEES", "0.85"))
+XAU_GOLD_MIN_NET_RR_AFTER_FEES = float(os.environ.get("XAU_GOLD_MIN_NET_RR_AFTER_FEES", "0.75"))
 XAU_GOLD_MAX_ENTRY_DRIFT_PCT  = float(os.environ.get("XAU_GOLD_MAX_ENTRY_DRIFT_PCT", "0.25"))
 XAU_GOLD_BLOCK_FALLBACK       = os.environ.get("XAU_GOLD_BLOCK_FALLBACK", "true").lower() == "true"
 XAU_GOLD_BLOCK_GRID           = os.environ.get("XAU_GOLD_BLOCK_GRID", "true").lower() == "true"
@@ -151,9 +156,9 @@ TSL_TRAIL_PCT      = float(os.environ.get("TSL_TRAIL_PCT", "0.15"))        # % t
 # ===================== Liquidity Windows =====================
 LIQUIDITY_FOCUS_ENABLED    = os.environ.get("LIQUIDITY_FOCUS_ENABLED", "true").lower() == "true"
 LIQUIDITY_FOCUS_MODE       = os.environ.get("LIQUIDITY_FOCUS_MODE", "soft").lower()  # soft | strict
-LIQUIDITY_WINDOWS_VN_RAW   = os.environ.get("LIQUIDITY_WINDOWS_VN", "14-17,19-23")
-LIQUIDITY_SOFT_MIN_RR      = float(os.environ.get("LIQUIDITY_SOFT_MIN_RR", "1.40"))
-LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", "2.35"))
+LIQUIDITY_WINDOWS_VN_RAW   = os.environ.get("LIQUIDITY_WINDOWS_VN", "13-23")
+LIQUIDITY_SOFT_MIN_RR      = float(os.environ.get("LIQUIDITY_SOFT_MIN_RR", "1.20"))
+LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", "2.10"))
 HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS", str(MAX_ACTIVE_ORDERS + 1)))
 LOW_LIQUIDITY_MAX_ACTIVE_ORDERS  = int(os.environ.get("LOW_LIQUIDITY_MAX_ACTIVE_ORDERS", str(max(1, MAX_ACTIVE_ORDERS - 1))))
 

@@ -15,7 +15,7 @@ from config import (
     LEVERAGE,
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
-    STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT,
+    STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT, PUBLIC_BASE_URL,
     get_entry_drift_max_pct_for_symbol, interval_to_minutes_config,
 )
 
@@ -34,7 +34,7 @@ from bingx_client import bing_client, has_api_credentials
 from notifications import (
     send_telegram, format_startup_msg, format_signal_msg, format_status_msg,
     format_order_result_msg, format_pnl_msg, format_closed_positions_summary, build_entry_reason,
-    format_eod_daily_pnl_msg, format_eod_all_days_pnl_msg,
+    format_eod_daily_pnl_msg, format_eod_all_days_pnl_msg, run_telegram_command_polling,
 )
 
 # Phân tích On-chart
@@ -475,6 +475,101 @@ try:
 except Exception as e:
     print(f"[WARN] setup_dashboard failed: {e}")
 
+
+def _format_active_positions_for_command():
+    lines = []
+    for symbol in SYMBOLS:
+        positions = active_positions_by_symbol.get(symbol, [])
+        if not positions:
+            lines.append(f"• <b>{symbol}</b>: chưa có lệnh bot đang theo dõi")
+            continue
+
+        live_price = bing_client.get_last_price(symbol)
+        for pos in positions:
+            label = pos.get("label", "LỆNH")
+            side = pos.get("side", "N/A")
+            interval = pos.get("interval", INTERVAL)
+            strategy = pos.get("strategy", "scalp")
+            entry = pos.get("entry")
+            quantity = pos.get("quantity", 0)
+            pnl_text = "PnL: N/A"
+            if live_price is not None:
+                pnl = calc_live_pnl(pos, float(live_price))
+                pnl_pct = calc_live_pnl_pct(pos, float(live_price))
+                pnl_text = f"PnL: <b>{pnl:+.2f} USDT</b> ({pnl_pct:+.2f}%)"
+            lines.append(
+                f"• <b>{symbol}</b> {label}: {side} {strategy}/{interval} | "
+                f"Entry <b>{format_price(entry)}</b> | Qty <b>{quantity}</b> | {pnl_text}"
+            )
+    return "\n".join(lines)
+
+
+def build_telegram_command_reply(command):
+    command = (command or "").lower()
+    trading_mode = "TRADE TỰ ĐỘNG" if is_trading_enabled() else "READ-ONLY"
+
+    if command == "balance":
+        current_vst = bing_client.get_vst_balance() if has_api_credentials() else vst_bal
+        return (
+            "💵 <b>SMC Bot - Số dư</b>\n\n"
+            f"VST: <b>{float(current_vst or 0):.4f}</b>\n"
+            f"Chế độ: <b>{trading_mode}</b>\n"
+            f"Cập nhật: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
+        )
+
+    if command == "positions":
+        return (
+            "📌 <b>SMC Bot - Vị thế đang theo dõi</b>\n\n"
+            f"{_format_active_positions_for_command()}\n\n"
+            f"Cập nhật: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
+        )
+
+    if command == "dashboard":
+        if PUBLIC_BASE_URL:
+            return (
+                "🌐 <b>SMC Bot Dashboard</b>\n\n"
+                f"Overview: {PUBLIC_BASE_URL}/dashboard\n"
+                f"History: {PUBLIC_BASE_URL}/dashboard/history\n"
+                f"Running: {PUBLIC_BASE_URL}/dashboard/running\n"
+                f"Analytics: {PUBLIC_BASE_URL}/dashboard/analytics\n"
+                f"System: {PUBLIC_BASE_URL}/dashboard/system"
+            )
+        return (
+            "🌐 <b>SMC Bot Dashboard</b>\n\n"
+            "Chưa cấu hình <b>PUBLIC_BASE_URL</b>, nên bot chưa thể gửi link dashboard công khai.\n"
+            "Nếu chạy trên Railway, hãy đặt PUBLIC_BASE_URL bằng URL app public rồi restart bot."
+        )
+
+    active_counts = {symbol: len(active_positions_by_symbol.get(symbol, [])) for symbol in SYMBOLS}
+    last_prices = []
+    for symbol in SYMBOLS:
+        price = bing_client.get_last_price(symbol)
+        last_prices.append(f"{symbol}: <b>{format_price(price) if price is not None else 'N/A'}</b>")
+    liquidity_text = "mạnh" if is_high_liquidity_time(now_vn()) else "thấp/ngoài khung mạnh"
+    wait_lines = [f"• {symbol}: {last_skip_reason_by_symbol.get(symbol, 'N/A')}" for symbol in SYMBOLS]
+    wait_text = "\n".join(wait_lines)
+    return (
+        "📊 <b>SMC Bot - Trạng thái</b>\n\n"
+        f"Chế độ: <b>{trading_mode}</b>\n"
+        f"Signal engine: <b>{resolve_signal_engine()}</b>\n"
+        f"Symbols: <b>{', '.join(SYMBOLS)}</b>\n"
+        f"TF theo dõi: <b>{', '.join(SIGNAL_INTERVALS)}</b>\n"
+        f"TF quyết định: <b>{', '.join(DECISION_INTERVALS)}</b>\n"
+        f"Thanh khoản hiện tại: <b>{liquidity_text}</b>\n"
+        f"Lệnh đang theo dõi: <b>{sum(active_counts.values())}</b> ({active_counts})\n"
+        f"Giá: {' | '.join(last_prices)}\n\n"
+        "📝 <b>Lý do chờ/skip gần nhất</b>\n"
+        f"{wait_text}\n\n"
+        f"Cập nhật: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
+    )
+
+
+threading.Thread(
+    target=run_telegram_command_polling,
+    args=(build_telegram_command_reply,),
+    daemon=True,
+    name="TelegramCommands",
+).start()
 
 
 while True:
