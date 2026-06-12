@@ -42,15 +42,15 @@ SYMBOL = SYMBOLS[0]
 
 # ===================== Timeframes =====================
 INTERVAL            = os.environ.get("INTERVAL", "1h")
-# Include 15m/30m by default; 1h-only scanning was too sparse for active operation.
-SCALP_INTERVALS_RAW = os.environ.get("SCALP_INTERVALS", "15m,30m,1h")
+# Include 5m by default so the bot can take more valid setups without waiting only for 15m+.
+SCALP_INTERVALS_RAW = os.environ.get("SCALP_INTERVALS", "5m,15m,30m,1h")
 SWING_INTERVALS_RAW = os.environ.get("SWING_INTERVALS", "4h,1d")
 DEFAULT_DECISION_INTERVALS = ["5m", "15m", "1h", "4h", "1d"]
 DECISION_INTERVALS_RAW = os.environ.get("DECISION_INTERVALS", ",".join(DEFAULT_DECISION_INTERVALS))
 VALID_INTERVALS     = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 INTERVAL_MINUTES_MAP = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
-# Default 15m keeps signal frequency usable while still avoiding very noisy 1m/3m entries.
-MIN_TRADE_INTERVAL_MINUTES = int(os.environ.get("MIN_TRADE_INTERVAL_MINUTES", "15"))
+# Default 5m increases trade opportunities while still avoiding very noisy 1m/3m entries.
+MIN_TRADE_INTERVAL_MINUTES = int(os.environ.get("MIN_TRADE_INTERVAL_MINUTES", "5"))
 
 def interval_to_minutes_config(interval):
     return INTERVAL_MINUTES_MAP.get((interval or "").lower(), 0)
@@ -77,11 +77,11 @@ SCALP_RR_MAX_HIGH_QUALITY  = float(os.environ.get("SCALP_RR_MAX_HIGH_QUALITY", "
 SCALP_RR_MAX_MED_QUALITY   = float(os.environ.get("SCALP_RR_MAX_MED_QUALITY", "1.80"))
 QUALITY_HIGH_THRESHOLD     = float(os.environ.get("QUALITY_HIGH_THRESHOLD", "2.50"))
 QUALITY_MED_THRESHOLD      = float(os.environ.get("QUALITY_MED_THRESHOLD", "2.00"))
-SCALP_MIN_QUALITY_SCORE    = float(os.environ.get("SCALP_MIN_QUALITY_SCORE", "1.8"))
-MIN_SIGNAL_QUALITY_SCORE   = float(os.environ.get("MIN_SIGNAL_QUALITY_SCORE", "2.00"))
+SCALP_MIN_QUALITY_SCORE    = float(os.environ.get("SCALP_MIN_QUALITY_SCORE", "1.65"))
+MIN_SIGNAL_QUALITY_SCORE   = float(os.environ.get("MIN_SIGNAL_QUALITY_SCORE", "1.85"))
 HIGH_QUALITY_THRESHOLD     = float(os.environ.get("HIGH_QUALITY_THRESHOLD", "2.60"))
 HIGH_QUALITY_COOLDOWN_FACTOR = float(os.environ.get("HIGH_QUALITY_COOLDOWN_FACTOR", "0.70"))
-FALLBACK_MIN_QUALITY_SCORE = float(os.environ.get("FALLBACK_MIN_QUALITY_SCORE", "2.25"))
+FALLBACK_MIN_QUALITY_SCORE = float(os.environ.get("FALLBACK_MIN_QUALITY_SCORE", "2.05"))
 
 # ===================== Risk / SL =====================
 SL_BUFFER_PCT    = float(os.environ.get("SL_BUFFER_PCT", "0.12"))
@@ -109,14 +109,14 @@ XAU_GOLD_SYMBOL_KEYWORDS    = tuple(
     for item in os.environ.get("XAU_GOLD_SYMBOL_KEYWORDS", "XAU,XAUT,GOLD").split(",")
     if item.strip()
 )
-# Gold stays protected from 1m/3m noise, but 15m setups are allowed by default.
-XAU_GOLD_MIN_INTERVAL_MINUTES = int(os.environ.get("XAU_GOLD_MIN_INTERVAL_MINUTES", "15"))
-XAU_GOLD_MAX_ACTIVE_ORDERS    = int(os.environ.get("XAU_GOLD_MAX_ACTIVE_ORDERS", "2"))
-XAU_GOLD_MIN_QUALITY_BONUS    = float(os.environ.get("XAU_GOLD_MIN_QUALITY_BONUS", "0.15"))
-XAU_GOLD_MIN_RR               = float(os.environ.get("XAU_GOLD_MIN_RR", "1.30"))
-XAU_GOLD_MIN_NET_RR_AFTER_FEES = float(os.environ.get("XAU_GOLD_MIN_NET_RR_AFTER_FEES", "0.75"))
-XAU_GOLD_MAX_ENTRY_DRIFT_PCT  = float(os.environ.get("XAU_GOLD_MAX_ENTRY_DRIFT_PCT", "0.25"))
-XAU_GOLD_BLOCK_FALLBACK       = os.environ.get("XAU_GOLD_BLOCK_FALLBACK", "true").lower() == "true"
+# Gold stays protected from 1m/3m noise, but 5m+ setups are allowed by default.
+XAU_GOLD_MIN_INTERVAL_MINUTES = int(os.environ.get("XAU_GOLD_MIN_INTERVAL_MINUTES", "5"))
+XAU_GOLD_MAX_ACTIVE_ORDERS    = int(os.environ.get("XAU_GOLD_MAX_ACTIVE_ORDERS", "3"))
+XAU_GOLD_MIN_QUALITY_BONUS    = float(os.environ.get("XAU_GOLD_MIN_QUALITY_BONUS", "0.05"))
+XAU_GOLD_MIN_RR               = float(os.environ.get("XAU_GOLD_MIN_RR", "1.15"))
+XAU_GOLD_MIN_NET_RR_AFTER_FEES = float(os.environ.get("XAU_GOLD_MIN_NET_RR_AFTER_FEES", "0.65"))
+XAU_GOLD_MAX_ENTRY_DRIFT_PCT  = float(os.environ.get("XAU_GOLD_MAX_ENTRY_DRIFT_PCT", "0.35"))
+XAU_GOLD_BLOCK_FALLBACK       = os.environ.get("XAU_GOLD_BLOCK_FALLBACK", "false").lower() == "true"
 XAU_GOLD_BLOCK_GRID           = os.environ.get("XAU_GOLD_BLOCK_GRID", "true").lower() == "true"
 
 
@@ -132,10 +132,10 @@ def get_entry_drift_max_pct_for_symbol(symbol: str) -> float:
 
 # ===================== Signal Engine =====================
 ALLOW_FALLBACK_SIGNAL          = os.environ.get("ALLOW_FALLBACK_SIGNAL", "true").lower() == "true"
-FALLBACK_REQUIRE_HIGH_LIQUIDITY = os.environ.get("FALLBACK_REQUIRE_HIGH_LIQUIDITY", "true").lower() == "true"
+FALLBACK_REQUIRE_HIGH_LIQUIDITY = os.environ.get("FALLBACK_REQUIRE_HIGH_LIQUIDITY", "false").lower() == "true"
 READ_ONLY_MODE  = os.environ.get("READ_ONLY_MODE", "false").lower() == "true"
 SIGNAL_ENGINE   = os.environ.get("SIGNAL_ENGINE", "auto").lower()  # auto | strict | backtest_v5
-SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "180"))
+SIGNAL_COOLDOWN_SECONDS = int(os.environ.get("SIGNAL_COOLDOWN_SECONDS", "120"))
 
 # ===================== Breakeven =====================
 BE_TRIGGER_PCT = float(os.environ.get("BE_TRIGGER_PCT", "50.0"))
@@ -157,10 +157,10 @@ TSL_TRAIL_PCT      = float(os.environ.get("TSL_TRAIL_PCT", "0.15"))        # % t
 LIQUIDITY_FOCUS_ENABLED    = os.environ.get("LIQUIDITY_FOCUS_ENABLED", "true").lower() == "true"
 LIQUIDITY_FOCUS_MODE       = os.environ.get("LIQUIDITY_FOCUS_MODE", "soft").lower()  # soft | strict
 LIQUIDITY_WINDOWS_VN_RAW   = os.environ.get("LIQUIDITY_WINDOWS_VN", "13-23")
-LIQUIDITY_SOFT_MIN_RR      = float(os.environ.get("LIQUIDITY_SOFT_MIN_RR", "1.20"))
-LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", "2.10"))
+LIQUIDITY_SOFT_MIN_RR      = float(os.environ.get("LIQUIDITY_SOFT_MIN_RR", "1.05"))
+LIQUIDITY_SOFT_MIN_QUALITY = float(os.environ.get("LIQUIDITY_SOFT_MIN_QUALITY", "1.90"))
 HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS = int(os.environ.get("HIGH_LIQUIDITY_MAX_ACTIVE_ORDERS", str(MAX_ACTIVE_ORDERS + 1)))
-LOW_LIQUIDITY_MAX_ACTIVE_ORDERS  = int(os.environ.get("LOW_LIQUIDITY_MAX_ACTIVE_ORDERS", str(max(1, MAX_ACTIVE_ORDERS - 1))))
+LOW_LIQUIDITY_MAX_ACTIVE_ORDERS  = int(os.environ.get("LOW_LIQUIDITY_MAX_ACTIVE_ORDERS", str(max(2, MAX_ACTIVE_ORDERS - 1))))
 
 # ===================== Grid Bot =====================
 GRID_BOT_ENABLED    = os.environ.get("GRID_BOT_ENABLED", "false").lower() == "true"
@@ -202,6 +202,9 @@ TELEGRAM_DEDUP_WINDOW_SECONDS = float(os.environ.get("TELEGRAM_DEDUP_WINDOW_SECO
 WAIT_LOG_INTERVAL_SECONDS = int(os.environ.get("WAIT_LOG_INTERVAL_SECONDS", "60"))
 STATUS_NOTIFY_SECONDS = int(os.environ.get("STATUS_NOTIFY_SECONDS", "7200"))
 PNL_NOTIFY_THRESHOLD_PCT = float(os.environ.get("PNL_NOTIFY_THRESHOLD_PCT", "20.0"))
+# Flag positions as long-held in Telegram /positions after this many hours.
+# Swing TFs are given a wider dynamic threshold in bot.py.
+POSITION_AGE_WARNING_HOURS = float(os.environ.get("POSITION_AGE_WARNING_HOURS", "12"))
 TSL_NOTIFY_MIN_PROGRESS_DELTA = float(os.environ.get("TSL_NOTIFY_MIN_PROGRESS_DELTA", "15.0"))
 TSL_NOTIFY_MIN_SL_MOVE_PCT = float(os.environ.get("TSL_NOTIFY_MIN_SL_MOVE_PCT", "0.12"))
 

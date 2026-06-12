@@ -23,7 +23,8 @@ TELEGRAM_COMMANDS = [
     {"command": "start", "description": "Khởi động và xem hướng dẫn dùng bot"},
     {"command": "help", "description": "Danh sách lệnh Telegram của SMC Bot"},
     {"command": "status", "description": "Xem trạng thái chạy, symbol và TF theo dõi"},
-    {"command": "positions", "description": "Xem các lệnh/vị thế bot đang theo dõi"},
+    {"command": "positions", "description": "Xem lệnh đang mở, PnL và thời gian giữ"},
+    {"command": "orders", "description": "Alias nhanh của /positions"},
     {"command": "balance", "description": "Xem số dư VST hiện tại"},
     {"command": "dashboard", "description": "Mở dashboard read-only nếu đã cấu hình URL"},
 ]
@@ -88,7 +89,8 @@ def format_help_command_msg():
         "🚀 /start - kiểm tra bot và xem hướng dẫn nhanh\n"
         "❓ /help - xem danh sách lệnh\n"
         "📊 /status - trạng thái bot, mode, symbol và TF\n"
-        "📌 /positions - vị thế/lệnh bot đang theo dõi\n"
+        "📌 /positions - vị thế/lệnh đang theo dõi, PnL và thời gian giữ\n"
+        "📎 /orders - alias nhanh của /positions\n"
         "💵 /balance - số dư VST hiện tại"
         f"{dashboard_line}\n\n"
         "Nếu menu lệnh chưa hiện ngay, hãy đóng/mở lại khung chat Telegram hoặc gõ /help trực tiếp."
@@ -150,7 +152,7 @@ def run_telegram_command_polling(status_provider):
             try:
                 if command in {"start", "help"}:
                     reply = format_help_command_msg()
-                elif command in {"status", "positions", "balance", "dashboard"}:
+                elif command in {"status", "positions", "orders", "balance", "dashboard"}:
                     reply = status_provider(command)
                 else:
                     reply = "⚠️ Lệnh chưa hỗ trợ. Gõ /help để xem danh sách lệnh hiện có."

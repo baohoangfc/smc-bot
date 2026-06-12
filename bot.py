@@ -5,6 +5,7 @@ bot.py — Trái tim của SMC Bot. Chứa loop chính (Data Fetching + Signal S
 import os
 import time
 import threading
+from datetime import datetime
 from flask import Flask, jsonify, render_template, request
 
 # Các cấu hình và biến toàn cục
@@ -15,7 +16,7 @@ from config import (
     LEVERAGE,
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
-    STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT, PUBLIC_BASE_URL,
+    STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT, PUBLIC_BASE_URL, POSITION_AGE_WARNING_HOURS,
     get_entry_drift_max_pct_for_symbol, interval_to_minutes_config,
 )
 
@@ -476,8 +477,61 @@ except Exception as e:
     print(f"[WARN] setup_dashboard failed: {e}")
 
 
+def _coerce_opened_at(opened_at):
+    if isinstance(opened_at, datetime):
+        return opened_at
+    if isinstance(opened_at, str):
+        try:
+            return datetime.fromisoformat(opened_at)
+        except Exception:
+            return None
+    return None
+
+
+def _format_duration(hours):
+    if hours is None:
+        return "N/A"
+    total_minutes = max(0, int(round(hours * 60)))
+    days, rem_minutes = divmod(total_minutes, 24 * 60)
+    hrs, mins = divmod(rem_minutes, 60)
+    if days > 0:
+        return f"{days} ngày {hrs} giờ"
+    if hrs > 0:
+        return f"{hrs} giờ {mins} phút"
+    return f"{mins} phút"
+
+
+def _position_age_hours(pos, now_dt=None):
+    opened_at = _coerce_opened_at(pos.get("opened_at"))
+    if not opened_at:
+        return None
+    now_dt = now_dt or now_vn()
+    return max(0.0, (now_dt - opened_at).total_seconds() / 3600.0)
+
+
+def _position_age_warning_threshold(pos):
+    interval = str(pos.get("interval") or "").lower()
+    strategy = str(pos.get("strategy") or "").lower()
+    base = float(POSITION_AGE_WARNING_HOURS)
+    if strategy == "swing" or interval == "1d":
+        return max(base, 72.0)
+    if interval == "4h":
+        return max(base, 24.0)
+    if interval == "1h":
+        return max(base, 18.0)
+    return base
+
+
+def _is_position_long_held(pos, now_dt=None):
+    age_hours = _position_age_hours(pos, now_dt=now_dt)
+    if age_hours is None:
+        return False
+    return age_hours >= _position_age_warning_threshold(pos)
+
+
 def _format_active_positions_for_command():
     lines = []
+    now_dt = now_vn()
     for symbol in SYMBOLS:
         positions = active_positions_by_symbol.get(symbol, [])
         if not positions:
@@ -492,6 +546,11 @@ def _format_active_positions_for_command():
             strategy = pos.get("strategy", "scalp")
             entry = pos.get("entry")
             quantity = pos.get("quantity", 0)
+            age_hours = _position_age_hours(pos, now_dt=now_dt)
+            hold_text = _format_duration(age_hours)
+            opened_at = _coerce_opened_at(pos.get("opened_at"))
+            opened_text = opened_at.strftime("%d/%m %H:%M") if opened_at else "N/A"
+            age_flag = " ⚠️ <b>ôm lâu</b>" if _is_position_long_held(pos, now_dt=now_dt) else ""
             pnl_text = "PnL: N/A"
             if live_price is not None:
                 pnl = calc_live_pnl(pos, float(live_price))
@@ -499,9 +558,21 @@ def _format_active_positions_for_command():
                 pnl_text = f"PnL: <b>{pnl:+.2f} USDT</b> ({pnl_pct:+.2f}%)"
             lines.append(
                 f"• <b>{symbol}</b> {label}: {side} {strategy}/{interval} | "
-                f"Entry <b>{format_price(entry)}</b> | Qty <b>{quantity}</b> | {pnl_text}"
+                f"Entry <b>{format_price(entry)}</b> | TP <b>{format_price(pos.get('tp'))}</b> | "
+                f"SL <b>{format_price(pos.get('sl'))}</b> | Qty <b>{quantity}</b> | {pnl_text} | "
+                f"Mở <b>{opened_text}</b> | Giữ <b>{hold_text}</b>{age_flag}"
             )
     return "\n".join(lines)
+
+
+def _count_long_held_positions():
+    now_dt = now_vn()
+    return sum(
+        1
+        for symbol in SYMBOLS
+        for pos in active_positions_by_symbol.get(symbol, [])
+        if _is_position_long_held(pos, now_dt=now_dt)
+    )
 
 
 def build_telegram_command_reply(command):
@@ -517,7 +588,7 @@ def build_telegram_command_reply(command):
             f"Cập nhật: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
         )
 
-    if command == "positions":
+    if command in {"positions", "orders"}:
         return (
             "📌 <b>SMC Bot - Vị thế đang theo dõi</b>\n\n"
             f"{_format_active_positions_for_command()}\n\n"
@@ -541,6 +612,7 @@ def build_telegram_command_reply(command):
         )
 
     active_counts = {symbol: len(active_positions_by_symbol.get(symbol, [])) for symbol in SYMBOLS}
+    long_held_count = _count_long_held_positions()
     last_prices = []
     for symbol in SYMBOLS:
         price = bing_client.get_last_price(symbol)
@@ -557,6 +629,7 @@ def build_telegram_command_reply(command):
         f"TF quyết định: <b>{', '.join(DECISION_INTERVALS)}</b>\n"
         f"Thanh khoản hiện tại: <b>{liquidity_text}</b>\n"
         f"Lệnh đang theo dõi: <b>{sum(active_counts.values())}</b> ({active_counts})\n"
+        f"Lệnh ôm lâu: <b>{long_held_count}</b>\n"
         f"Giá: {' | '.join(last_prices)}\n\n"
         "📝 <b>Lý do chờ/skip gần nhất</b>\n"
         f"{wait_text}\n\n"
