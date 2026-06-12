@@ -41,6 +41,12 @@
 - **Liquidity filter bớt chặn ngoài giờ**: cửa sổ thanh khoản VN mặc định mở rộng `13-23`, soft RR tối thiểu còn `1.20`, soft quality tối thiểu còn `2.10`.
 - **Fallback strict bớt kén**: `FALLBACK_MIN_QUALITY_SCORE` mặc định giảm còn `2.25` để strict engine có thêm cơ hội dùng tín hiệu backtest_v5 chất lượng vừa.
 
+## 1g) Bổ sung nhịp vào lệnh khi bot quá ít lệnh (11/06/2026)
+- **More active defaults**: `MIN_TRADE_INTERVAL_MINUTES` mặc định giảm còn `5`, `SCALP_INTERVALS` mặc định thêm `5m` (`5m,15m,30m,1h`) để có thêm setup nhưng vẫn tránh `1m/3m`.
+- **Quality gate bớt kén**: `MIN_SIGNAL_QUALITY_SCORE` còn `1.85`, `SCALP_MIN_QUALITY_SCORE` còn `1.65`, `FALLBACK_MIN_QUALITY_SCORE` còn `2.05`.
+- **Gold guard mở hơn nhưng còn bảo vệ**: XAU/XAUT/GOLD cho phép TF từ `5m`, tối đa `3` lệnh, bonus quality còn `0.05`, RR tối thiểu `1.15`, net RR sau phí `0.65`, entry drift tối đa `0.35`, và không chặn fallback mặc định.
+- **Liquidity/cooldown bớt nghẽn**: fallback không bắt buộc high-liquidity, cooldown mặc định `120s`, ngoài giờ thanh khoản soft gate còn RR `1.05`, quality `1.90`, low-liquidity vẫn cho tối thiểu `2` lệnh.
+
 ## 2) Luồng bot hiện tại (rút gọn)
 1. Lấy dữ liệu giá/khung thời gian.
 2. Sinh tín hiệu SMC theo các TF theo dõi.
