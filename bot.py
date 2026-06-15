@@ -78,6 +78,24 @@ def health_check():
     return "SMC Bot is running!", 200
 
 
+@app.route("/api/health")
+def health_api():
+    return jsonify({
+        "ok": True,
+        "service": "SMC Bot",
+        "mode": "auto_trade" if is_trading_enabled() else "read_only",
+        "trading_enabled": is_trading_enabled(),
+        "trading_disabled_reason": trading_disabled_reason(),
+        "symbols": SYMBOLS,
+        "signal_intervals": SIGNAL_INTERVALS,
+        "decision_intervals": DECISION_INTERVALS,
+        "read_only_mode": READ_ONLY_MODE,
+        "has_bingx_api_key": bool(BINGX_API_KEY),
+        "has_bingx_secret_key": bool(BINGX_SECRET_KEY),
+        "updated_at_vn": now_vn().strftime("%Y-%m-%d %H:%M:%S GMT+7"),
+    })
+
+
 @app.route("/dashboard")
 def dashboard_page():
     from gsheets import get_dashboard_payload, get_demo_dashboard_payload
@@ -170,6 +188,19 @@ def is_trading_enabled():
     if READ_ONLY_MODE:
         return False
     return has_api_credentials()
+
+
+def trading_disabled_reason():
+    reasons = []
+    if READ_ONLY_MODE:
+        reasons.append("READ_ONLY_MODE=true")
+    if not BINGX_API_KEY:
+        reasons.append("thiếu BINGX_API_KEY")
+    if not BINGX_SECRET_KEY:
+        reasons.append("thiếu BINGX_SECRET_KEY")
+    if not reasons:
+        return ""
+    return "; ".join(reasons)
 
 
 def extract_order_avg_price(order_result, fallback_price):
@@ -447,9 +478,11 @@ send_telegram(format_startup_msg(
 ))
 
 if not is_trading_enabled():
+    disabled_reason = trading_disabled_reason()
     send_telegram(
         "ℹ️ <b>Bot đang chạy ở chế độ READ-ONLY</b>\n"
         "Sẽ phân tích và gửi tín hiệu, nhưng không tự động đặt/đóng lệnh.\n"
+        f"Lý do: <b>{disabled_reason or 'không rõ'}</b>\n"
         "Để bật auto trade: cung cấp BINGX_API_KEY + BINGX_SECRET_KEY và tắt READ_ONLY_MODE."
     )
 
@@ -578,6 +611,7 @@ def _count_long_held_positions():
 def build_telegram_command_reply(command):
     command = (command or "").lower()
     trading_mode = "TRADE TỰ ĐỘNG" if is_trading_enabled() else "READ-ONLY"
+    disabled_reason = trading_disabled_reason()
 
     if command == "balance":
         current_vst = bing_client.get_vst_balance() if has_api_credentials() else vst_bal
@@ -585,6 +619,7 @@ def build_telegram_command_reply(command):
             "💵 <b>SMC Bot - Số dư</b>\n\n"
             f"VST: <b>{float(current_vst or 0):.4f}</b>\n"
             f"Chế độ: <b>{trading_mode}</b>\n"
+            f"{f'Lý do tắt auto trade: <b>{disabled_reason}</b>' if disabled_reason else ''}\n"
             f"Cập nhật: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
         )
 
@@ -623,6 +658,7 @@ def build_telegram_command_reply(command):
     return (
         "📊 <b>SMC Bot - Trạng thái</b>\n\n"
         f"Chế độ: <b>{trading_mode}</b>\n"
+        f"{f'Lý do tắt auto trade: <b>{disabled_reason}</b>' if disabled_reason else ''}\n"
         f"Signal engine: <b>{resolve_signal_engine()}</b>\n"
         f"Symbols: <b>{', '.join(SYMBOLS)}</b>\n"
         f"TF theo dõi: <b>{', '.join(SIGNAL_INTERVALS)}</b>\n"
