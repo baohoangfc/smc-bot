@@ -3,7 +3,7 @@
 > Mục tiêu: Tổng hợp trạng thái code mới nhất để Codex có thể đọc nhanh và sửa đúng ngữ cảnh khi có thay đổi.
 
 ## 1) Version snapshot
-- Context version: `v2026.06.10-2`
+- Context version: `v2026.10.20-1`
 - Repo chính hiện tại: `smc-bot`
 - File runtime cốt lõi: `bot.py`
 - Các file hỗ trợ: `requirements.txt`, `Dockerfile`, `railway.toml`, `SMC_AUDIT.md`
@@ -102,7 +102,7 @@
   - Yêu cầu `XAU_GOLD_MIN_RR=1.30` và `XAU_GOLD_MIN_NET_RR_AFTER_FEES=0.75`.
   - Mặc định chặn fallback/grid cho XAU bằng `XAU_GOLD_BLOCK_FALLBACK=true`, `XAU_GOLD_BLOCK_GRID=true`.
 - Tần suất noti trạng thái chờ:
-  - Giới hạn theo từng symbol (mỗi symbol tối đa 1 lần/giờ khi không có lệnh mở).
+  - Giới hạn theo từng symbol: mặc định 1 lần mỗi 4 giờ khi không có lệnh mở (`STATUS_NOTIFY_SECONDS=14400`). Có thể ghi đè bằng biến môi trường này.
   - Nếu chạy nhiều symbol, noti có thể xuất hiện gần nhau theo phút nhưng khác symbol.
 
 ## 4) Quy ước khi thay đổi code (cho Codex)
