@@ -200,7 +200,7 @@ GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "")
 HTTP_TIMEOUT             = float(os.environ.get("HTTP_TIMEOUT", "15"))
 TELEGRAM_DEDUP_WINDOW_SECONDS = float(os.environ.get("TELEGRAM_DEDUP_WINDOW_SECONDS", "20"))
 WAIT_LOG_INTERVAL_SECONDS = int(os.environ.get("WAIT_LOG_INTERVAL_SECONDS", "60"))
-STATUS_NOTIFY_SECONDS = int(os.environ.get("STATUS_NOTIFY_SECONDS", "7200"))
+STATUS_NOTIFY_SECONDS = int(os.environ.get("STATUS_NOTIFY_SECONDS", "14400"))
 PNL_NOTIFY_THRESHOLD_PCT = float(os.environ.get("PNL_NOTIFY_THRESHOLD_PCT", "20.0"))
 # Flag positions as long-held in Telegram /positions after this many hours.
 # Swing TFs are given a wider dynamic threshold in bot.py.
