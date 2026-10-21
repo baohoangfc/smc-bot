@@ -13,7 +13,7 @@ from config import (
     SYMBOLS, SIGNAL_INTERVALS, SCALP_INTERVALS, SWING_INTERVALS, DECISION_INTERVALS,
     GRID_BOT_ENABLED, GRID_INTERVAL, GRID_MIN_CANDLES,
     INTERVAL, DATA_SOURCE, MARGIN_STANDARD, MARGIN_HIGH_QUALITY,
-    LEVERAGE,
+    STARTING_CAPITAL_USDT, LEVERAGE,
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
     STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT, PUBLIC_BASE_URL, POSITION_AGE_WARNING_HOURS,
@@ -435,7 +435,8 @@ for _sym in SYMBOLS:
 
 time.sleep(10) # Đợi dữ liệu lần đầu
 
-vst_bal = bing_client.get_vst_balance() if has_api_credentials() else 0.0
+# Fixed virtual capital for sizing/testing; do not derive risk sizing from BingX wallet balance.
+vst_bal = STARTING_CAPITAL_USDT
 learning_state = load_learning_state()
 learning_meta = {"dirty": False, "last_save_ts": time.time()}
 
@@ -614,10 +615,11 @@ def build_telegram_command_reply(command):
     disabled_reason = trading_disabled_reason()
 
     if command == "balance":
-        current_vst = bing_client.get_vst_balance() if has_api_credentials() else vst_bal
+        current_vst = vst_bal
         return (
-            "💵 <b>SMC Bot - Số dư</b>\n\n"
-            f"VST: <b>{float(current_vst or 0):.4f}</b>\n"
+            "💵 <b>SMC Bot - Vốn mô phỏng</b>\n\n"
+            f"Vốn cấu hình: <b>${float(current_vst or 0):.2f}</b> USDT\n"
+            "Nguồn vốn tính risk/position sizing: vốn cố định, không đọc số dư BingX.\n"
             f"Chế độ: <b>{trading_mode}</b>\n"
             f"{f'Lý do tắt auto trade: <b>{disabled_reason}</b>' if disabled_reason else ''}\n"
             f"Cập nhật: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
