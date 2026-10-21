@@ -79,7 +79,7 @@
   - `/start`, `/help`: hướng dẫn nhanh và danh sách lệnh.
   - `/status`: mode, engine, symbol, TF theo dõi/quyết định, trạng thái thanh khoản, giá và lý do chờ/skip gần nhất.
   - `/positions`: các vị thế/lệnh bot đang theo dõi, entry, quantity và PnL tạm tính nếu lấy được giá.
-  - `/balance`: số dư VST nếu có credential BingX; nếu không thì dùng snapshot startup.
+  - `/balance`: hiển thị vốn mô phỏng cố định từ `STARTING_CAPITAL_USDT` (mặc định 1000 USDT), không đọc số dư BingX để tính risk/position sizing.
   - `/dashboard`: trả link dashboard theo `PUBLIC_BASE_URL`, hoặc hướng dẫn cấu hình nếu biến này trống.
 - Bot chỉ trả lời lệnh từ `TELEGRAM_CHAT_ID` khi biến này được cấu hình; có thể tắt polling lệnh bằng `TELEGRAM_COMMANDS_ENABLED=false`.
 
