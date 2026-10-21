@@ -18,7 +18,7 @@ BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 BINGX_URL        = "https://open-api-vst.bingx.com"
 DATA_SOURCE      = "BINGX"
 # Fixed virtual account capital used for risk sizing; independent of BingX wallet balance.
-STARTING_CAPITAL_USDT = float(os.environ.get("STARTING_CAPITAL_USDT", "1000"))
+STARTING_CAPITAL_USDT = 1000.0  # Fixed test capital; intentionally not sourced from environment or BingX.
 
 # ===================== Symbols =====================
 def normalize_bingx_symbol(symbol: str) -> str:
