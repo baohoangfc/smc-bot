@@ -13,7 +13,7 @@ from config import (
     SYMBOLS, SIGNAL_INTERVALS, SCALP_INTERVALS, SWING_INTERVALS, DECISION_INTERVALS,
     GRID_BOT_ENABLED, GRID_INTERVAL, GRID_MIN_CANDLES,
     INTERVAL, DATA_SOURCE, MARGIN_STANDARD, MARGIN_HIGH_QUALITY,
-    STARTING_CAPITAL_USDT, LEVERAGE,
+    STARTING_CAPITAL_USDT, PAPER_TRADING_MODE, LEVERAGE, TAKER_FEE_PCT,
     MIN_SIGNAL_QUALITY_SCORE, WAIT_LOG_INTERVAL_SECONDS, BINGX_API_KEY, BINGX_SECRET_KEY, READ_ONLY_MODE,
     LIQUIDITY_FOCUS_ENABLED, LIQUIDITY_WINDOWS_VN_RAW,
     STATUS_NOTIFY_SECONDS, PNL_NOTIFY_THRESHOLD_PCT, PUBLIC_BASE_URL, POSITION_AGE_WARNING_HOURS,
@@ -182,9 +182,9 @@ threading.Thread(target=run_health_server, daemon=True, name="HealthServer").sta
 
 
 def is_trading_enabled():
-    """
-    Chỉ cho phép đặt/đóng lệnh khi đủ API key và không bật READ_ONLY_MODE.
-    """
+    """Enable local paper execution without requiring or calling BingX order APIs."""
+    if PAPER_TRADING_MODE:
+        return True
     if READ_ONLY_MODE:
         return False
     return has_api_credentials()
@@ -456,7 +456,7 @@ for symbol in SYMBOLS:
 
 # Bổ sung vị thế thực trên sàn nếu chưa có trong state
 for symbol in SYMBOLS:
-    exchange_position = bing_client.get_open_position(symbol) if is_trading_enabled() else None
+    exchange_position = bing_client.get_open_position(symbol) if (is_trading_enabled() and not PAPER_TRADING_MODE) else None
     already_tracked = any(
         p.get("side") == (exchange_position or {}).get("side")
         for p in active_positions_by_symbol.get(symbol, [])
@@ -467,7 +467,7 @@ for symbol in SYMBOLS:
         active_positions_by_symbol[symbol].append(exchange_position)
         print(f"[STARTUP] [{symbol}] Phát hiện vị thế trên sàn chưa track → thêm vào danh sách.")
         
-    if is_trading_enabled() and (not active_positions_by_symbol[symbol]):
+    if is_trading_enabled() and not PAPER_TRADING_MODE and (not active_positions_by_symbol[symbol]):
         from config import LEVERAGE
         bing_client.set_leverage(symbol, "LONG", LEVERAGE)
         bing_client.set_leverage(symbol, "SHORT", LEVERAGE)
@@ -825,7 +825,7 @@ while True:
                     )
                     for pos in removable_positions:
                         pnl_snapshot = calc_live_pnl(pos, float(live_price))
-                        close_resp = bing_client.close_position_market(symbol, pos.get("side"), pos.get("quantity"))
+                        close_resp = ({"code": 0, "paper": True} if PAPER_TRADING_MODE else bing_client.close_position_market(symbol, pos.get("side"), pos.get("quantity")))
                         close_ok = close_resp and close_resp.get("code") == 0
                         if close_ok:
                             active_positions_by_symbol[symbol] = [x for x in active_positions_by_symbol[symbol] if x.get("label") != pos.get("label")]
@@ -914,10 +914,10 @@ while True:
                         last_skip_reason_by_symbol[symbol] = "Quantity tính ra <= 0 sau risk sizing."
                         print(f"[INFO] [{symbol}] Bỏ qua đặt lệnh: quantity <= 0")
                         continue
-                    order = bing_client.place_market_order(
+                    order = ({"code": 0, "paper": True, "msg": "Paper trade simulated"} if PAPER_TRADING_MODE else bing_client.place_market_order(
                         symbol, "BUY" if signal['side'] == 'LONG' else "SELL", signal['side'], quantity,
                         order_signal['tp'], order_signal['sl']
-                    )
+                    ))
                     print(f"[{symbol}] Order Result (Margin=${used_margin}, Qty={quantity}): {order}")
                     
                     if order and order.get("code") == 0:
@@ -927,7 +927,7 @@ while True:
                         fill_price = extract_order_avg_price(order, last_price)
                         send_telegram(format_order_result_msg(order_signal, symbol, order, order_label, fill_price, vst_balance_text=f"{vst_bal:.1f}"))
                         
-                        protection_result = bing_client.add_missing_tp_sl(symbol, signal["side"], order_signal.get("tp"), order_signal.get("sl"))
+                        protection_result = None if PAPER_TRADING_MODE else bing_client.add_missing_tp_sl(symbol, signal["side"], order_signal.get("tp"), order_signal.get("sl"))
                         exchange_pos = (protection_result or {}).get("position")
                         
                         active_positions_by_symbol[symbol].append({
@@ -940,6 +940,8 @@ while True:
                             "tp": exchange_pos.get("tp") if exchange_pos and exchange_pos.get("tp") is not None else order_signal.get("tp"),
                             "sl": exchange_pos.get("sl") if exchange_pos and exchange_pos.get("sl") is not None else order_signal.get("sl"),
                             "margin": used_margin,
+                            "leverage": LEVERAGE,
+                            "paper": PAPER_TRADING_MODE,
                             "opened_at": now_vn()
                         })
                         save_active_positions(active_positions_by_symbol)
@@ -963,7 +965,7 @@ while True:
                 last_wait_log_ts_by_symbol[symbol] = now_ts
 
             if active_positions:
-                if is_trading_enabled():
+                if is_trading_enabled() and not PAPER_TRADING_MODE:
                     exchange_pos = bing_client.get_open_position(symbol)
                     if not exchange_pos:
                         for pos in active_positions:
@@ -1004,7 +1006,7 @@ while True:
                     should_partial, close_qty = check_partial_take_profit(pos, float(live_price), symbol)
                     if should_partial:
                         print(f"[PARTIAL TP] {symbol} {pos.get('label')}: ROI >= 100% -> Chốt {close_qty}")
-                        close_res = bing_client.close_position_market(symbol, pos["side"], close_qty)
+                        close_res = ({"code": 0, "paper": True} if PAPER_TRADING_MODE else bing_client.close_position_market(symbol, pos["side"], close_qty))
                         if close_res and close_res.get("code") == 0:
                             pos["partial_tp_done"] = True
                             # Giảm quantity trong state để đồng bộ (hoặc đợi sync ở vòng lặp sau)
@@ -1031,7 +1033,7 @@ while True:
                     active_positions = active_positions_by_symbol[symbol]
                     
                     now_ts = time.time()
-                    if is_trading_enabled() and (pos.get("tp") is not None or pos.get("sl") is not None):
+                    if is_trading_enabled() and not PAPER_TRADING_MODE and (pos.get("tp") is not None or pos.get("sl") is not None):
                         # Giảm tần suất gọi API check/update TP/SL để tránh Rate Limit (Error 109429)
                         if (now_ts - last_tp_sl_sync_ts_by_symbol.get(symbol, 0.0)) >= 120:
                             tp_on_exchange, sl_on_exchange = bing_client.get_position_protection_levels(symbol, pos["side"])
@@ -1072,7 +1074,7 @@ while True:
             maybe_flush_learning_state(learning_state, learning_meta)
 
         # Định kỳ cập nhật trạng thái các lệnh lên Google Sheet 'Active_Positions' (ví dụ mỗi 5 phút)
-        if is_trading_enabled() and (time.time() - last_gsheet_active_sync_ts >= 300):
+        if is_trading_enabled() and not PAPER_TRADING_MODE and (time.time() - last_gsheet_active_sync_ts >= 300):
             try:
                 from gsheets import export_active_positions
                 latest_prices = {s: float(bing_client.get_last_price(s) or 0) for s in SYMBOLS}
