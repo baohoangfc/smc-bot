@@ -677,6 +677,7 @@ def build_telegram_command_reply(command):
             f"PnL đã chốt (sau phí ước tính): <b>{paper_account['realized_pnl']:+.2f}</b> USDT\n"
             f"Phí ước tính đã trả: <b>{paper_account['fees_paid']:.2f}</b> USDT\n"
             f"Vốn sau PnL đã chốt: <b>${float(current_vst or 0):.2f}</b> USDT\n"
+            f"PnL chưa chốt: <b>{open_pnl:+.2f}</b> USDT | Equity ước tính: <b>${float(current_vst or 0) + open_pnl:.2f}</b> USDT\n"
             f"Lệnh đã đóng: <b>{paper_account['closed_trades']}</b> | Thắng: <b>{paper_account['wins']}</b> | Thua: <b>{paper_account['losses']}</b> | Win rate: <b>{win_rate:.1f}%</b>\n"
             "Lệnh mô phỏng; không đặt lệnh hoặc đọc số dư ví BingX.\n"
             f"Cập nhật: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
@@ -885,6 +886,8 @@ while True:
                         close_resp = ({"code": 0, "paper": True} if PAPER_TRADING_MODE else bing_client.close_position_market(symbol, pos.get("side"), pos.get("quantity")))
                         close_ok = close_resp and close_resp.get("code") == 0
                         if close_ok:
+                            if PAPER_TRADING_MODE:
+                                pnl_snapshot = _record_paper_close(pos, float(live_price), "REVERSE_OR_LIMIT")
                             active_positions_by_symbol[symbol] = [x for x in active_positions_by_symbol[symbol] if x.get("label") != pos.get("label")]
                             active_positions = active_positions_by_symbol[symbol]
                             save_active_positions(active_positions_by_symbol)
@@ -1055,6 +1058,8 @@ while True:
                 }
 
                 for pos in list(active_positions):
+                    if PAPER_TRADING_MODE:
+                        pos["last_price"] = float(live_price)
                     # Paper account exits when the tracked TP/SL level is reached by market price.
                     if PAPER_TRADING_MODE:
                         side = pos.get("side")
@@ -1090,6 +1095,8 @@ while True:
                         print(f"[PARTIAL TP] {symbol} {pos.get('label')}: ROI >= 100% -> Chốt {close_qty}")
                         close_res = ({"code": 0, "paper": True} if PAPER_TRADING_MODE else bing_client.close_position_market(symbol, pos["side"], close_qty))
                         if close_res and close_res.get("code") == 0:
+                            if PAPER_TRADING_MODE:
+                                _record_paper_close(pos, float(live_price), "PARTIAL_TP", quantity=close_qty)
                             pos["partial_tp_done"] = True
                             # Giảm quantity trong state để đồng bộ (hoặc đợi sync ở vòng lặp sau)
                             pos["quantity"] = float(pos.get("quantity", 0)) - close_qty
