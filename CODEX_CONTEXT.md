@@ -47,6 +47,15 @@
 - **Gold guard mở hơn nhưng còn bảo vệ**: XAU/XAUT/GOLD cho phép TF từ `5m`, tối đa `3` lệnh, bonus quality còn `0.05`, RR tối thiểu `1.15`, net RR sau phí `0.65`, entry drift tối đa `0.35`, và không chặn fallback mặc định.
 - **Liquidity/cooldown bớt nghẽn**: fallback không bắt buộc high-liquidity, cooldown mặc định `120s`, ngoài giờ thanh khoản soft gate còn RR `1.05`, quality `1.90`, low-liquidity vẫn cho tối thiểu `2` lệnh.
 
+
+
+## 1h) Paper Trading tài khoản ảo 1000 USDT (23/10/2026)
+- PAPER_TRADING_MODE=True: tín hiệu đạt điều kiện mở vị thế mô phỏng; bot không gọi API đặt/đóng lệnh hoặc đọc số dư BingX. BingX vẫn có thể là nguồn dữ liệu giá/nến.
+- Vốn ban đầu cố định STARTING_CAPITAL_USDT=1000.0. Sizing dùng vốn ban đầu cộng PnL đã chốt.
+- Vị thế mô phỏng tự đóng khi giá thị trường chạm TP/SL; cũng ghi nhận đóng khi chiến lược thay thế vị thế hoặc chốt lời một phần.
+- PnL đóng lệnh ước tính trừ phí taker hai chiều theo TAKER_FEE_PCT. Lệnh /balance báo PnL đã chốt, phí, PnL chưa chốt, equity ước tính, win rate và số lệnh thắng/thua.
+- Tài khoản lưu cục bộ tại paper_account.json; trên Railway cần persistent volume nếu muốn giữ số liệu qua lần redeploy/restart không có volume.
+
 ## 2) Luồng bot hiện tại (rút gọn)
 1. Lấy dữ liệu giá/khung thời gian.
 2. Sinh tín hiệu SMC theo các TF theo dõi.
