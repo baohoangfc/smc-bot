@@ -472,7 +472,8 @@ def _record_paper_close(position, exit_price, reason="CLOSE", quantity=None):
     paper_account["fees_paid"] += fees
     if quantity is None or qty >= float(position.get("quantity", 0) or 0) - 1e-12:
         paper_account["closed_trades"] += 1
-        if net > 0:
+        trade_net = net + float(position.get("partial_realized_pnl", 0.0) or 0.0)
+        if trade_net > 0:
             paper_account["wins"] += 1
         else:
             paper_account["losses"] += 1
@@ -1097,7 +1098,8 @@ while True:
                         close_res = ({"code": 0, "paper": True} if PAPER_TRADING_MODE else bing_client.close_position_market(symbol, pos["side"], close_qty))
                         if close_res and close_res.get("code") == 0:
                             if PAPER_TRADING_MODE:
-                                _record_paper_close(pos, float(live_price), "PARTIAL_TP", quantity=close_qty)
+                                partial_net = _record_paper_close(pos, float(live_price), "PARTIAL_TP", quantity=close_qty)
+                                pos["partial_realized_pnl"] = float(pos.get("partial_realized_pnl", 0.0) or 0.0) + partial_net
                             pos["partial_tp_done"] = True
                             # Giảm quantity trong state để đồng bộ (hoặc đợi sync ở vòng lặp sau)
                             pos["quantity"] = float(pos.get("quantity", 0)) - close_qty
