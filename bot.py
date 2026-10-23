@@ -3,6 +3,7 @@ bot.py — Trái tim của SMC Bot. Chứa loop chính (Data Fetching + Signal S
 Đã được refactor tách thành các module chuyên biệt: config, utils, state, learning, position_mgmt, signals.
 """
 import os
+import json
 import time
 import threading
 from datetime import datetime
@@ -436,7 +437,56 @@ for _sym in SYMBOLS:
 time.sleep(10) # Đợi dữ liệu lần đầu
 
 # Fixed virtual capital for sizing/testing; do not derive risk sizing from BingX wallet balance.
-vst_bal = STARTING_CAPITAL_USDT
+PAPER_ACCOUNT_FILE = os.environ.get("PAPER_ACCOUNT_FILE", "paper_account.json")
+
+def _load_paper_account():
+    try:
+        with open(PAPER_ACCOUNT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "realized_pnl": float(data.get("realized_pnl", 0.0)),
+            "closed_trades": int(data.get("closed_trades", 0)),
+            "wins": int(data.get("wins", 0)),
+            "losses": int(data.get("losses", 0)),
+            "fees_paid": float(data.get("fees_paid", 0.0)),
+        }
+    except Exception:
+        return {"realized_pnl": 0.0, "closed_trades": 0, "wins": 0, "losses": 0, "fees_paid": 0.0}
+
+paper_account = _load_paper_account()
+vst_bal = STARTING_CAPITAL_USDT + paper_account["realized_pnl"]
+
+def _save_paper_account():
+    try:
+        with open(PAPER_ACCOUNT_FILE, "w", encoding="utf-8") as f:
+            json.dump(paper_account, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"[PAPER] Không lưu được tài khoản mô phỏng: {exc}")
+
+def _record_paper_close(position, exit_price, reason="CLOSE", quantity=None):
+    """Book realized PnL and estimated round-trip taker fees for a paper position."""
+    global vst_bal
+    qty = float(position.get("quantity", 0) if quantity is None else quantity)
+    entry = float(position.get("entry", 0) or 0)
+    exit_price = float(exit_price or 0)
+    if qty <= 0 or entry <= 0 or exit_price <= 0:
+        return 0.0
+    gross = (exit_price - entry) * qty if position.get("side") == "LONG" else (entry - exit_price) * qty
+    fees = (entry * qty + exit_price * qty) * float(TAKER_FEE_PCT) / 100.0
+    net = gross - fees
+    paper_account["realized_pnl"] += net
+    paper_account["fees_paid"] += fees
+    if quantity is None or qty >= float(position.get("quantity", 0) or 0) - 1e-12:
+        paper_account["closed_trades"] += 1
+        if net > 0:
+            paper_account["wins"] += 1
+        else:
+            paper_account["losses"] += 1
+    vst_bal = STARTING_CAPITAL_USDT + paper_account["realized_pnl"]
+    _save_paper_account()
+    print(f"[PAPER] {reason} {position.get('label')} {position.get('side')} {qty:g} @ {exit_price:g}; gross={gross:+.4f}, fee={fees:.4f}, net={net:+.4f}, equity={vst_bal:.2f}")
+    return net
+
 learning_state = load_learning_state()
 learning_meta = {"dirty": False, "last_save_ts": time.time()}
 
@@ -616,12 +666,19 @@ def build_telegram_command_reply(command):
 
     if command == "balance":
         current_vst = vst_bal
+        open_pnl = sum(
+            calc_live_pnl(pos, float(pos.get("last_price", pos.get("entry", 0)) or 0))
+            for positions in active_positions_by_symbol.values() for pos in positions if pos.get("paper")
+        )
+        win_rate = (paper_account["wins"] / paper_account["closed_trades"] * 100.0) if paper_account["closed_trades"] else 0.0
         return (
-            "💵 <b>SMC Bot - Vốn mô phỏng</b>\n\n"
-            f"Vốn cấu hình: <b>${float(current_vst or 0):.2f}</b> USDT\n"
-            "Nguồn vốn tính risk/position sizing: vốn cố định, không đọc số dư BingX.\n"
-            f"Chế độ: <b>{trading_mode}</b>\n"
-            f"{f'Lý do tắt auto trade: <b>{disabled_reason}</b>' if disabled_reason else ''}\n"
+            "🧪 <b>SMC Bot - Tài khoản Paper Trading</b>\n\n"
+            f"Vốn ban đầu: <b>${STARTING_CAPITAL_USDT:.2f}</b> USDT\n"
+            f"PnL đã chốt (sau phí ước tính): <b>{paper_account['realized_pnl']:+.2f}</b> USDT\n"
+            f"Phí ước tính đã trả: <b>{paper_account['fees_paid']:.2f}</b> USDT\n"
+            f"Vốn sau PnL đã chốt: <b>${float(current_vst or 0):.2f}</b> USDT\n"
+            f"Lệnh đã đóng: <b>{paper_account['closed_trades']}</b> | Thắng: <b>{paper_account['wins']}</b> | Thua: <b>{paper_account['losses']}</b> | Win rate: <b>{win_rate:.1f}%</b>\n"
+            "Lệnh mô phỏng; không đặt lệnh hoặc đọc số dư ví BingX.\n"
             f"Cập nhật: <b>{now_vn().strftime('%d/%m/%Y %H:%M')} (GMT+7)</b>"
         )
 
@@ -998,6 +1055,31 @@ while True:
                 }
 
                 for pos in list(active_positions):
+                    # Paper account exits when the tracked TP/SL level is reached by market price.
+                    if PAPER_TRADING_MODE:
+                        side = pos.get("side")
+                        tp = float(pos.get("tp") or 0)
+                        sl = float(pos.get("sl") or 0)
+                        price_now = float(live_price)
+                        hit_tp = tp > 0 and ((side == "LONG" and price_now >= tp) or (side == "SHORT" and price_now <= tp))
+                        hit_sl = sl > 0 and ((side == "LONG" and price_now <= sl) or (side == "SHORT" and price_now >= sl))
+                        if hit_tp or hit_sl:
+                            exit_reason = "TP" if hit_tp else "SL"
+                            net_pnl = _record_paper_close(pos, tp if hit_tp else sl, exit_reason)
+                            active_positions_by_symbol[symbol] = [x for x in active_positions_by_symbol[symbol] if x.get("label") != pos.get("label")]
+                            active_positions = active_positions_by_symbol[symbol]
+                            save_active_positions(active_positions_by_symbol)
+                            closed_cycle_pnl_by_symbol[symbol] += net_pnl
+                            update_learning_state(learning_state, symbol, pos.get("strategy", "scalp"), pos.get("interval", INTERVAL), side, net_pnl)
+                            mark_learning_dirty(learning_meta)
+                            send_telegram(
+                                f"{'🎯' if hit_tp else '🛑'} <b>{symbol} - {pos.get('label')} đóng Paper {exit_reason}</b>\n"
+                                f"Giá thoát: <b>{float(tp if hit_tp else sl):.6g}</b>\n"
+                                f"PnL ròng ước tính: <b>{net_pnl:+.2f} USDT</b>\n"
+                                f"Vốn sau PnL đã chốt: <b>{vst_bal:.2f} USDT</b>"
+                            )
+                            last_pnl_notified_pct_by_symbol[symbol].pop(pos.get("label", ""), None)
+                            continue
                     # 1. Breakeven
                     pos = check_breakeven_condition(pos, float(live_price), symbol)
                     
