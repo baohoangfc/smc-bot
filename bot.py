@@ -84,7 +84,7 @@ def health_api():
     return jsonify({
         "ok": True,
         "service": "SMC Bot",
-        "mode": "auto_trade" if is_trading_enabled() else "read_only",
+        "mode": "paper_trading" if PAPER_TRADING_MODE else ("auto_trade" if is_trading_enabled() else "read_only"),
         "trading_enabled": is_trading_enabled(),
         "trading_disabled_reason": trading_disabled_reason(),
         "symbols": SYMBOLS,
@@ -521,6 +521,13 @@ send_telegram(format_startup_msg(
     vst_bal, is_trading_enabled(), resolve_signal_engine(), SCALP_INTERVALS, SWING_INTERVALS, 
     GRID_BOT_ENABLED, GRID_INTERVAL, GRID_STEP_PCT, resolve_signal_engine(), SYMBOLS, DECISION_INTERVALS
 ))
+if PAPER_TRADING_MODE:
+    send_telegram(
+        "🧪 <b>PAPER TRADING ĐANG BẬT</b>\n"
+        "Vốn ban đầu: <b>1,000 USDT</b>. Bot chỉ mô phỏng khớp lệnh và PnL; "
+        "không gửi lệnh mua/bán/đóng lệnh và không đọc số dư BingX.\n"
+        "Dùng /balance để xem equity, PnL, phí và thống kê lệnh."
+    )
 
 if not is_trading_enabled():
     disabled_reason = trading_disabled_reason()
@@ -655,7 +662,7 @@ def _count_long_held_positions():
 
 def build_telegram_command_reply(command):
     command = (command or "").lower()
-    trading_mode = "TRADE TỰ ĐỘNG" if is_trading_enabled() else "READ-ONLY"
+    trading_mode = "PAPER TRADING - vốn ảo 1000 USDT" if PAPER_TRADING_MODE else ("TRADE TỰ ĐỘNG" if is_trading_enabled() else "READ-ONLY")
     disabled_reason = trading_disabled_reason()
 
     if command == "balance":
