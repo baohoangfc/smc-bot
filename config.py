@@ -19,6 +19,7 @@ BINGX_URL        = "https://open-api-vst.bingx.com"
 DATA_SOURCE      = "BINGX"
 # Fixed virtual account capital used for risk sizing; independent of BingX wallet balance.
 STARTING_CAPITAL_USDT = 1000.0  # Fixed test capital; intentionally not sourced from environment or BingX.
+PAPER_TRADING_MODE = True  # Simulate entries/exits locally; never submit orders to BingX.
 
 # ===================== Symbols =====================
 def normalize_bingx_symbol(symbol: str) -> str:
