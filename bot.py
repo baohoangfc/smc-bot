@@ -57,7 +57,7 @@ from position_mgmt import (
 # Persistence (Lưu trạng thái)
 from state import (
     load_learning_state, save_learning_state,
-    load_active_positions, save_active_positions
+    load_active_positions, save_active_positions, load_paper_account, save_paper_account
 )
 from learning import apply_learning_to_signal_v2, update_learning_state
 
@@ -440,28 +440,22 @@ time.sleep(10) # Đợi dữ liệu lần đầu
 PAPER_ACCOUNT_FILE = os.environ.get("PAPER_ACCOUNT_FILE", "paper_account.json")
 
 def _load_paper_account():
-    try:
-        with open(PAPER_ACCOUNT_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {
-            "realized_pnl": float(data.get("realized_pnl", 0.0)),
-            "closed_trades": int(data.get("closed_trades", 0)),
-            "wins": int(data.get("wins", 0)),
-            "losses": int(data.get("losses", 0)),
-            "fees_paid": float(data.get("fees_paid", 0.0)),
-        }
-    except Exception:
-        return {"realized_pnl": 0.0, "closed_trades": 0, "wins": 0, "losses": 0, "fees_paid": 0.0}
+    data = load_paper_account(PAPER_ACCOUNT_FILE)
+    defaults = {"realized_pnl": 0.0, "closed_trades": 0, "wins": 0, "losses": 0, "fees_paid": 0.0}
+    defaults.update(data or {})
+    defaults["realized_pnl"] = float(defaults["realized_pnl"])
+    defaults["closed_trades"] = int(defaults["closed_trades"])
+    defaults["wins"] = int(defaults["wins"])
+    defaults["losses"] = int(defaults["losses"])
+    defaults["fees_paid"] = float(defaults["fees_paid"])
+    return defaults
 
 paper_account = _load_paper_account()
 vst_bal = STARTING_CAPITAL_USDT + paper_account["realized_pnl"]
 
 def _save_paper_account():
-    try:
-        with open(PAPER_ACCOUNT_FILE, "w", encoding="utf-8") as f:
-            json.dump(paper_account, f, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        print(f"[PAPER] Không lưu được tài khoản mô phỏng: {exc}")
+    if not save_paper_account(paper_account, PAPER_ACCOUNT_FILE):
+        print("[PAPER] Không lưu được tài khoản mô phỏng.")
 
 def _record_paper_close(position, exit_price, reason="CLOSE", quantity=None):
     """Book realized PnL and estimated round-trip taker fees for a paper position."""
