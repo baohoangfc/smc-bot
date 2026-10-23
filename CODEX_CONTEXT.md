@@ -54,7 +54,7 @@
 - Vốn ban đầu cố định STARTING_CAPITAL_USDT=1000.0. Sizing dùng vốn ban đầu cộng PnL đã chốt.
 - Vị thế mô phỏng tự đóng khi giá thị trường chạm TP/SL; cũng ghi nhận đóng khi chiến lược thay thế vị thế hoặc chốt lời một phần.
 - PnL đóng lệnh ước tính trừ phí taker hai chiều theo TAKER_FEE_PCT. Lệnh /balance báo PnL đã chốt, phí, PnL chưa chốt, equity ước tính, win rate và số lệnh thắng/thua.
-- Tài khoản lưu cục bộ tại paper_account.json; trên Railway cần persistent volume nếu muốn giữ số liệu qua lần redeploy/restart không có volume.
+- Tài khoản lưu Firestore nếu FIREBASE_CREDENTIALS_JSON được cấu hình; nếu không, dùng paper_account.json cục bộ. Trên Railway, nên bật Firestore hoặc persistent volume để giữ số liệu qua redeploy/restart.
 
 ## 2) Luồng bot hiện tại (rút gọn)
 1. Lấy dữ liệu giá/khung thời gian.
