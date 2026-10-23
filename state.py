@@ -182,3 +182,32 @@ def load_active_positions(symbols):
     except Exception as e:
         print(f"[WARN] load_active_positions failed: {e}")
         return default
+
+
+# ==================== Paper Trading Account ====================
+
+def load_paper_account(local_path="paper_account.json"):
+    """Load the paper account from Firestore first, then local disk."""
+    data = _firestore_get("paper_account")
+    if isinstance(data, dict) and isinstance(data.get("account"), dict):
+        return data["account"]
+    try:
+        with open(local_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_paper_account(account, local_path="paper_account.json"):
+    """Persist paper account to Firestore when configured, with local-file fallback."""
+    payload = {"account": account, "updated_at": time.time()}
+    if _firestore_set("paper_account", payload):
+        return True
+    try:
+        with open(local_path, "w", encoding="utf-8") as f:
+            json.dump(account, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[WARN] save_paper_account failed: {e}")
+        return False
